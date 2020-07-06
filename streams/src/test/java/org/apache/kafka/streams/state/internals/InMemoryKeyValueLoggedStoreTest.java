@@ -16,9 +16,10 @@
  */
 package org.apache.kafka.streams.state.internals;
 
+import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.streams.processor.ProcessorContext;
-import org.apache.kafka.streams.processor.StateStoreSupplier;
 import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.Stores;
 
 import java.util.Collections;
@@ -27,23 +28,16 @@ public class InMemoryKeyValueLoggedStoreTest extends AbstractKeyValueStoreTest {
 
     @SuppressWarnings("unchecked")
     @Override
-    protected <K, V> KeyValueStore<K, V> createKeyValueStore(
-            ProcessorContext context,
-            Class<K> keyClass,
-            Class<V> valueClass,
-            boolean useContextSerdes) {
+    protected <K, V> KeyValueStore<K, V> createKeyValueStore(final ProcessorContext context) {
+        final StoreBuilder<KeyValueStore<K, V>> storeBuilder = Stores.keyValueStoreBuilder(
+            Stores.inMemoryKeyValueStore("my-store"),
+            (Serde<K>) context.keySerde(),
+            (Serde<V>) context.valueSerde())
+            .withLoggingEnabled(Collections.singletonMap("retention.ms", "1000"));
 
-        StateStoreSupplier supplier;
-        if (useContextSerdes) {
-            supplier = Stores.create("my-store").withKeys(context.keySerde()).withValues(context.valueSerde())
-                .inMemory().enableLogging(Collections.singletonMap("retention.ms", "1000")).build();
-        } else {
-            supplier = Stores.create("my-store").withKeys(keyClass).withValues(valueClass)
-                .inMemory().enableLogging(Collections.singletonMap("retention.ms", "1000")).build();
-        }
-
-        KeyValueStore<K, V> store = (KeyValueStore<K, V>) supplier.get();
+        final KeyValueStore<K, V> store = storeBuilder.build();
         store.init(context, store);
+
         return store;
     }
 }

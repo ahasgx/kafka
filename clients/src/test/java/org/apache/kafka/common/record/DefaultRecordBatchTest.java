@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.common.record;
 
+import org.apache.kafka.common.InvalidRecordException;
+import org.apache.kafka.common.errors.CorruptRecordException;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.utils.CloseableIterator;
@@ -33,6 +35,42 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class DefaultRecordBatchTest {
+
+    @Test
+    public void testWriteEmptyHeader() {
+        long producerId = 23423L;
+        short producerEpoch = 145;
+        int baseSequence = 983;
+        long baseOffset = 15L;
+        long lastOffset = 37;
+        int partitionLeaderEpoch = 15;
+        long timestamp = System.currentTimeMillis();
+
+        for (TimestampType timestampType : Arrays.asList(TimestampType.CREATE_TIME, TimestampType.LOG_APPEND_TIME)) {
+            for (boolean isTransactional : Arrays.asList(true, false)) {
+                for (boolean isControlBatch : Arrays.asList(true, false)) {
+                    ByteBuffer buffer = ByteBuffer.allocate(2048);
+                    DefaultRecordBatch.writeEmptyHeader(buffer, RecordBatch.CURRENT_MAGIC_VALUE, producerId,
+                            producerEpoch, baseSequence, baseOffset, lastOffset, partitionLeaderEpoch, timestampType,
+                            timestamp, isTransactional, isControlBatch);
+                    buffer.flip();
+                    DefaultRecordBatch batch = new DefaultRecordBatch(buffer);
+                    assertEquals(producerId, batch.producerId());
+                    assertEquals(producerEpoch, batch.producerEpoch());
+                    assertEquals(baseSequence, batch.baseSequence());
+                    assertEquals(baseSequence + ((int) (lastOffset - baseOffset)), batch.lastSequence());
+                    assertEquals(baseOffset, batch.baseOffset());
+                    assertEquals(lastOffset, batch.lastOffset());
+                    assertEquals(partitionLeaderEpoch, batch.partitionLeaderEpoch());
+                    assertEquals(isTransactional, batch.isTransactional());
+                    assertEquals(timestampType, batch.timestampType());
+                    assertEquals(timestamp, batch.maxTimestamp());
+                    assertEquals(RecordBatch.NO_TIMESTAMP, batch.firstTimestamp());
+                    assertEquals(isControlBatch, batch.isControlBatch());
+                }
+            }
+        }
+    }
 
     @Test
     public void buildDefaultRecordBatch() {
@@ -137,7 +175,7 @@ public class DefaultRecordBatchTest {
         assertEquals(actualSize, DefaultRecordBatch.sizeInBytes(Arrays.asList(records)));
     }
 
-    @Test(expected = InvalidRecordException.class)
+    @Test(expected = CorruptRecordException.class)
     public void testInvalidRecordSize() {
         MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V2, 0L,
                 CompressionType.NONE, TimestampType.CREATE_TIME,
@@ -197,7 +235,7 @@ public class DefaultRecordBatchTest {
         }
     }
 
-    @Test(expected = InvalidRecordException.class)
+    @Test(expected = CorruptRecordException.class)
     public void testInvalidCrc() {
         MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V2, 0L,
                 CompressionType.NONE, TimestampType.CREATE_TIME,
@@ -340,10 +378,42 @@ public class DefaultRecordBatchTest {
     }
 
     @Test
+    public void testSkipKeyValueIteratorCorrectness() {
+        Header[] headers = {new RecordHeader("k1", "v1".getBytes()), new RecordHeader("k2", "v2".getBytes())};
+
+        MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V2, 0L,
+            CompressionType.LZ4, TimestampType.CREATE_TIME,
+            new SimpleRecord(1L, "a".getBytes(), "1".getBytes()),
+            new SimpleRecord(2L, "b".getBytes(), "2".getBytes()),
+            new SimpleRecord(3L, "c".getBytes(), "3".getBytes()),
+            new SimpleRecord(1000L, "abc".getBytes(), "0".getBytes()),
+            new SimpleRecord(9999L, "abc".getBytes(), "0".getBytes(), headers)
+            );
+        DefaultRecordBatch batch = new DefaultRecordBatch(records.buffer());
+        try (CloseableIterator<Record> streamingIterator = batch.skipKeyValueIterator(BufferSupplier.NO_CACHING)) {
+            assertEquals(Arrays.asList(
+                new PartialDefaultRecord(9, (byte) 0, 0L, 1L, -1, 1, 1),
+                new PartialDefaultRecord(9, (byte) 0, 1L, 2L, -1, 1, 1),
+                new PartialDefaultRecord(9, (byte) 0, 2L, 3L, -1, 1, 1),
+                new PartialDefaultRecord(12, (byte) 0, 3L, 1000L, -1, 3, 1),
+                new PartialDefaultRecord(25, (byte) 0, 4L, 9999L, -1, 3, 1)
+                ),
+                Utils.toList(streamingIterator)
+            );
+        }
+    }
+
+    @Test
     public void testIncrementSequence() {
         assertEquals(10, DefaultRecordBatch.incrementSequence(5, 5));
         assertEquals(0, DefaultRecordBatch.incrementSequence(Integer.MAX_VALUE, 1));
         assertEquals(4, DefaultRecordBatch.incrementSequence(Integer.MAX_VALUE - 5, 10));
+    }
+
+    @Test
+    public void testDecrementSequence() {
+        assertEquals(0, DefaultRecordBatch.decrementSequence(5, 5));
+        assertEquals(Integer.MAX_VALUE, DefaultRecordBatch.decrementSequence(0, 1));
     }
 
     private static DefaultRecordBatch recordsWithInvalidRecordCount(Byte magicValue, long timestamp,

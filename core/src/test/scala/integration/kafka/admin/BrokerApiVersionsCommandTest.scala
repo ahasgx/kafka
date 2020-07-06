@@ -20,6 +20,8 @@ package kafka.admin
 import java.io.{ByteArrayOutputStream, PrintStream}
 import java.nio.charset.StandardCharsets
 
+import scala.collection.Seq
+
 import kafka.integration.KafkaServerTestHarness
 import kafka.server.KafkaConfig
 import kafka.utils.TestUtils
@@ -30,17 +32,17 @@ import org.junit.Test
 
 class BrokerApiVersionsCommandTest extends KafkaServerTestHarness {
 
-  def generateConfigs(): Seq[KafkaConfig] = TestUtils.createBrokerConfigs(1, zkConnect).map(KafkaConfig.fromProps)
+  def generateConfigs: Seq[KafkaConfig] = TestUtils.createBrokerConfigs(1, zkConnect).map(KafkaConfig.fromProps)
 
   @Test(timeout=120000)
-  def checkBrokerApiVersionCommandOutput() {
+  def checkBrokerApiVersionCommandOutput(): Unit = {
     val byteArrayOutputStream = new ByteArrayOutputStream
     val printStream = new PrintStream(byteArrayOutputStream, false, StandardCharsets.UTF_8.name())
     BrokerApiVersionsCommand.execute(Array("--bootstrap-server", brokerList), printStream)
     val content = new String(byteArrayOutputStream.toByteArray, StandardCharsets.UTF_8)
     val lineIter = content.split("\n").iterator
     assertTrue(lineIter.hasNext)
-    assertEquals(s"$brokerList (id: 0 rack: null) -> (", lineIter.next)
+    assertEquals(s"$brokerList (id: 0 rack: null) -> (", lineIter.next())
     val nodeApiVersions = NodeApiVersions.create
     for (apiKey <- ApiKeys.values) {
       val apiVersion = nodeApiVersions.apiVersion(apiKey)
@@ -49,13 +51,13 @@ class BrokerApiVersionsCommandTest extends KafkaServerTestHarness {
         if (apiVersion.minVersion == apiVersion.maxVersion) apiVersion.minVersion.toString
         else s"${apiVersion.minVersion} to ${apiVersion.maxVersion}"
       val terminator = if (apiKey == ApiKeys.values.last) "" else ","
-      val usableVersion = nodeApiVersions.usableVersion(apiKey)
+      val usableVersion = nodeApiVersions.latestUsableVersion(apiKey)
       val line = s"\t${apiKey.name}(${apiKey.id}): $versionRangeStr [usable: $usableVersion]$terminator"
       assertTrue(lineIter.hasNext)
-      assertEquals(line, lineIter.next)
+      assertEquals(line, lineIter.next())
     }
     assertTrue(lineIter.hasNext)
-    assertEquals(")", lineIter.next)
+    assertEquals(")", lineIter.next())
     assertFalse(lineIter.hasNext)
   }
 }
