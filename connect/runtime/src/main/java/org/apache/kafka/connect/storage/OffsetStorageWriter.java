@@ -18,6 +18,7 @@ package org.apache.kafka.connect.storage;
 
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.util.Callback;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,10 +27,13 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * <p>
- * OffsetStorageWriter is a buffered writer that wraps the simple OffsetBackingStore interface.
+ * OffsetStorageWriter is a buffered writer that wraps the simple {@link OffsetBackingStore} interface.
  * It maintains a copy of the key-value data in memory and buffers writes. It allows you to take
  * a snapshot, which can then be asynchronously flushed to the backing store while new writes
  * continue to be processed. This allows Kafka Connect to process offset commits in the background
@@ -37,8 +41,8 @@ import java.util.concurrent.Future;
  * </p>
  * <p>
  * Connect uses an OffsetStorage implementation to save state about the current progress of
- * source (import to Kafka) jobs, which may have many input partitions and "offsets" may not be as
- * simple as they are for Kafka partitions or files. Offset storage is not required for sink jobs
+ * source (import to Kafka) connectors, which may have many input partitions and "offsets" may not be as
+ * simple as they are for Kafka partitions or files. Offset storage is not required for sink connectors
  * because they can use Kafka's native offset storage (or the sink data store can handle offset
  * storage to achieve exactly once semantics).
  * </p>
@@ -59,7 +63,7 @@ import java.util.concurrent.Future;
  * time.
  * </p>
  * <p>
- * This class is not thread-safe. It should only be accessed from a Task's processing thread.
+ * This class is thread-safe.
  * </p>
  */
 public class OffsetStorageWriter {
@@ -72,8 +76,8 @@ public class OffsetStorageWriter {
     // Offset data in Connect format
     private Map<Map<String, Object>, Map<String, Object>> data = new HashMap<>();
 
-    // Not synchronized, should only be accessed by flush thread
     private Map<Map<String, Object>, Map<String, Object>> toFlush = null;
+    private final Semaphore flushInProgress = new Semaphore(1);
     // Unique ID for each flush request to handle callbacks after timeouts
     private long currentFlushId = 0;
 
@@ -90,6 +94,7 @@ public class OffsetStorageWriter {
      * @param partition the partition to store an offset for
      * @param offset the offset
      */
+    @SuppressWarnings("unchecked")
     public synchronized void offset(Map<String, ?> partition, Map<String, ?> offset) {
         data.put((Map<String, Object>) partition, (Map<String, Object>) offset);
     }
@@ -100,24 +105,50 @@ public class OffsetStorageWriter {
 
     /**
      * Performs the first step of a flush operation, snapshotting the current state. This does not
-     * actually initiate the flush with the underlying storage.
+     * actually initiate the flush with the underlying storage. Ensures that any previous flush operations
+     * have finished before beginning a new flush.
      *
      * @return true if a flush was initiated, false if no data was available
+     * @throws ConnectException if the previous flush is not complete before this method is called
      */
-    public synchronized boolean beginFlush() {
-        if (flushing()) {
-            log.error("Invalid call to OffsetStorageWriter flush() while already flushing, the "
+    public boolean beginFlush() {
+        try {
+            return beginFlush(0, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException | TimeoutException e) {
+            log.error("Invalid call to OffsetStorageWriter beginFlush() while already flushing, the "
                     + "framework should not allow this");
             throw new ConnectException("OffsetStorageWriter is already flushing");
         }
+    }
 
-        if (data.isEmpty())
-            return false;
-
-        assert !flushing();
-        toFlush = data;
-        data = new HashMap<>();
-        return true;
+    /**
+     * Performs the first step of a flush operation, snapshotting the current state. This does not
+     * actually initiate the flush with the underlying storage. Ensures that any previous flush operations
+     * have finished before beginning a new flush.
+     * <p>If and only if this method returns true, the caller must call {@link #doFlush(Callback)}
+     * or {@link #cancelFlush()} to finish the flush operation and allow later calls to complete.
+     *
+     * @param timeout A maximum duration to wait for previous flushes to finish before giving up on waiting
+     * @param timeUnit Units of the timeout argument
+     * @return true if a flush was initiated, false if no data was available
+     * @throws InterruptedException if this thread was interrupted while waiting for the previous flush to complete
+     * @throws TimeoutException if the {@code timeout} elapses before previous flushes are complete.
+     */
+    public boolean beginFlush(long timeout, TimeUnit timeUnit) throws InterruptedException, TimeoutException {
+        if (flushInProgress.tryAcquire(Math.max(0, timeout), timeUnit)) {
+            synchronized (this) {
+                if (data.isEmpty()) {
+                    flushInProgress.release();
+                    return false;
+                } else {
+                    toFlush = data;
+                    data = new HashMap<>();
+                    return true;
+                }
+            }
+        } else {
+            throw new TimeoutException("Timed out waiting for previous flush to finish");
+        }
     }
 
     /**
@@ -126,47 +157,50 @@ public class OffsetStorageWriter {
      * writes the data to the backing store. If no offsets need to be written, the callback is
      * still invoked, but no Future is returned.
      *
-     * @return a Future, or null if there are no offsets to commitOffsets
+     * @return a Future, or null if there are no offsets to commit
      */
     public Future<Void> doFlush(final Callback<Void> callback) {
-        final long flushId = currentFlushId;
 
+        final long flushId;
         // Serialize
-        Map<ByteBuffer, ByteBuffer> offsetsSerialized;
-        try {
-            offsetsSerialized = new HashMap<>();
-            for (Map.Entry<Map<String, Object>, Map<String, Object>> entry : toFlush.entrySet()) {
-                // Offsets are specified as schemaless to the converter, using whatever internal schema is appropriate
-                // for that data. The only enforcement of the format is here.
-                OffsetUtils.validateFormat(entry.getKey());
-                OffsetUtils.validateFormat(entry.getValue());
-                // When serializing the key, we add in the namespace information so the key is [namespace, real key]
-                byte[] key = keyConverter.fromConnectData(namespace, null, Arrays.asList(namespace, entry.getKey()));
-                ByteBuffer keyBuffer = (key != null) ? ByteBuffer.wrap(key) : null;
-                byte[] value = valueConverter.fromConnectData(namespace, null, entry.getValue());
-                ByteBuffer valueBuffer = (value != null) ? ByteBuffer.wrap(value) : null;
-                offsetsSerialized.put(keyBuffer, valueBuffer);
+        final Map<ByteBuffer, ByteBuffer> offsetsSerialized;
+
+        synchronized (this) {
+            flushId = currentFlushId;
+
+            try {
+                offsetsSerialized = new HashMap<>(toFlush.size());
+                for (Map.Entry<Map<String, Object>, Map<String, Object>> entry : toFlush.entrySet()) {
+                    // Offsets are specified as schemaless to the converter, using whatever internal schema is appropriate
+                    // for that data. The only enforcement of the format is here.
+                    OffsetUtils.validateFormat(entry.getKey());
+                    OffsetUtils.validateFormat(entry.getValue());
+                    // When serializing the key, we add in the namespace information so the key is [namespace, real key]
+                    byte[] key = keyConverter.fromConnectData(namespace, null, Arrays.asList(namespace, entry.getKey()));
+                    ByteBuffer keyBuffer = (key != null) ? ByteBuffer.wrap(key) : null;
+                    byte[] value = valueConverter.fromConnectData(namespace, null, entry.getValue());
+                    ByteBuffer valueBuffer = (value != null) ? ByteBuffer.wrap(value) : null;
+                    offsetsSerialized.put(keyBuffer, valueBuffer);
+                }
+            } catch (Throwable t) {
+                // Must handle errors properly here or the writer will be left mid-flush forever and be
+                // unable to make progress.
+                log.error("CRITICAL: Failed to serialize offset data, making it impossible to commit "
+                        + "offsets under namespace {}. This likely won't recover unless the "
+                        + "unserializable partition or offset information is overwritten.", namespace);
+                log.error("Cause of serialization failure:", t);
+                callback.onCompletion(t, null);
+                return null;
             }
-        } catch (Throwable t) {
-            // Must handle errors properly here or the writer will be left mid-flush forever and be
-            // unable to make progress.
-            log.error("CRITICAL: Failed to serialize offset data, making it impossible to commit "
-                    + "offsets under namespace {}. This likely won't recover unless the "
-                    + "unserializable partition or offset information is overwritten.", namespace);
-            log.error("Cause of serialization failure:", t);
-            callback.onCompletion(t, null);
-            return null;
+
+            // And submit the data
+            log.debug("Submitting {} entries to backing store. The offsets are: {}", offsetsSerialized.size(), toFlush);
         }
 
-        // And submit the data
-        log.debug("Submitting {} entries to backing store", offsetsSerialized.size());
-        log.debug("The offsets are: " + toFlush.toString());
-        return backingStore.set(offsetsSerialized, new Callback<Void>() {
-            @Override
-            public void onCompletion(Throwable error, Void result) {
-                boolean isCurrent = handleFinishWrite(flushId, error, result);
-                if (isCurrent && callback != null)
-                    callback.onCompletion(error, result);
+        return backingStore.set(offsetsSerialized, (error, result) -> {
+            boolean isCurrent = handleFinishWrite(flushId, error);
+            if (isCurrent && callback != null) {
+                callback.onCompletion(error, result);
             }
         });
     }
@@ -184,6 +218,7 @@ public class OffsetStorageWriter {
             toFlush.putAll(data);
             data = toFlush;
             currentFlushId++;
+            flushInProgress.release();
             toFlush = null;
         }
     }
@@ -192,7 +227,7 @@ public class OffsetStorageWriter {
      * Handle completion of a write. Returns true if this callback is for the current flush
      * operation, false if it's for an old operation that should now be ignored.
      */
-    private synchronized boolean handleFinishWrite(long flushId, Throwable error, Void result) {
+    private synchronized boolean handleFinishWrite(long flushId, Throwable error) {
         // Callbacks need to be handled carefully since the flush operation may have already timed
         // out and been cancelled.
         if (flushId != currentFlushId)
@@ -202,6 +237,7 @@ public class OffsetStorageWriter {
             cancelFlush();
         } else {
             currentFlushId++;
+            flushInProgress.release();
             toFlush = null;
         }
         return true;

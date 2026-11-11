@@ -17,34 +17,41 @@
 
 package org.apache.kafka.clients.admin;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.Collection;
 
 /**
- * Options for {@link AdminClient#deleteTopics(Collection)}.
- *
- * The API of this class is evolving, see {@link AdminClient} for details.
+ * Options for {@link Admin#deleteTopics(Collection)}.
  */
-@InterfaceStability.Evolving
-public class DeleteTopicsOptions {
-    private Integer timeoutMs = null;
+@InterfaceAudience.Public
+public class DeleteTopicsOptions extends AbstractOptions<DeleteTopicsOptions> {
+
+    private boolean retryOnQuotaViolation = true;
 
     /**
-     * Set the request timeout in milliseconds for this operation or {@code null} if the default request timeout for the
+     * Set the timeout in milliseconds for this operation or {@code null} if the default api timeout for the
      * AdminClient should be used.
+     *
      */
+    // This method is retained to keep binary compatibility with 0.11
     public DeleteTopicsOptions timeoutMs(Integer timeoutMs) {
         this.timeoutMs = timeoutMs;
         return this;
     }
 
     /**
-     * The request timeout in milliseconds for this operation or {@code null} if the default request timeout for the
-     * AdminClient should be used.
+     * Set to true if quota violation should be automatically retried.
      */
-    public Integer timeoutMs() {
-        return timeoutMs;
+    public DeleteTopicsOptions retryOnQuotaViolation(boolean retryOnQuotaViolation) {
+        this.retryOnQuotaViolation = retryOnQuotaViolation;
+        return this;
     }
 
+    /**
+     * Returns true if quota violation should be automatically retried.
+     */
+    public boolean shouldRetryOnQuotaViolation() {
+        return retryOnQuotaViolation;
+    }
 }

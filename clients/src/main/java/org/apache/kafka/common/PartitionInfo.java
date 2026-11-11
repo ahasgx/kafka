@@ -14,25 +14,42 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common;
 
-/**
- * Information about a topic-partition.
- */
-public class PartitionInfo {
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
+import java.util.Arrays;
+import java.util.Objects;
+
+/**
+ * This is used to describe per-partition state in the MetadataResponse.
+ */
+@InterfaceAudience.Public
+public class PartitionInfo {
     private final String topic;
     private final int partition;
     private final Node leader;
     private final Node[] replicas;
     private final Node[] inSyncReplicas;
+    private final Node[] offlineReplicas;
 
     public PartitionInfo(String topic, int partition, Node leader, Node[] replicas, Node[] inSyncReplicas) {
+        this(topic, partition, leader, replicas, inSyncReplicas, new Node[0]);
+    }
+
+    public PartitionInfo(String topic,
+                         int partition,
+                         Node leader,
+                         Node[] replicas,
+                         Node[] inSyncReplicas,
+                         Node[] offlineReplicas) {
         this.topic = topic;
         this.partition = partition;
         this.leader = leader;
         this.replicas = replicas;
         this.inSyncReplicas = inSyncReplicas;
+        this.offlineReplicas = offlineReplicas;
     }
 
     /**
@@ -57,7 +74,8 @@ public class PartitionInfo {
     }
 
     /**
-     * The complete set of replicas for this partition regardless of whether they are alive or up-to-date
+     * The complete set of replicas for this partition regardless of whether they are alive or up-to-date. The preferred replica
+     * is the head of the list.
      */
     public Node[] replicas() {
         return replicas;
@@ -71,26 +89,58 @@ public class PartitionInfo {
         return inSyncReplicas;
     }
 
+    /**
+     * The subset of the replicas that are offline
+     */
+    public Node[] offlineReplicas() {
+        return offlineReplicas;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(topic, partition, leader, Arrays.hashCode(replicas),
+            Arrays.hashCode(inSyncReplicas), Arrays.hashCode(offlineReplicas));
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (this == obj)
+            return true;
+        if (obj == null)
+            return false;
+        if (getClass() != obj.getClass())
+            return false;
+        PartitionInfo other = (PartitionInfo) obj;
+        return Objects.equals(topic, other.topic) &&
+            partition == other.partition &&
+            Objects.equals(leader, other.leader) &&
+            Objects.deepEquals(replicas, other.replicas) &&
+            Objects.deepEquals(inSyncReplicas, other.inSyncReplicas) &&
+            Objects.deepEquals(offlineReplicas, other.offlineReplicas);
+    }
+
     @Override
     public String toString() {
-        return String.format("Partition(topic = %s, partition = %d, leader = %s, replicas = %s, isr = %s)",
+        return String.format("Partition(topic = %s, partition = %d, leader = %s, replicas = %s, isr = %s, offlineReplicas = %s)",
                              topic,
                              partition,
                              leader == null ? "none" : leader.idString(),
                              formatNodeIds(replicas),
-                             formatNodeIds(inSyncReplicas));
+                             formatNodeIds(inSyncReplicas),
+                             formatNodeIds(offlineReplicas));
     }
 
     /* Extract the node ids from each item in the array and format for display */
     private String formatNodeIds(Node[] nodes) {
         StringBuilder b = new StringBuilder("[");
-        for (int i = 0; i < nodes.length; i++) {
-            b.append(nodes[i].idString());
-            if (i < nodes.length - 1)
-                b.append(',');
+        if (nodes != null) {
+            for (int i = 0; i < nodes.length; i++) {
+                b.append(nodes[i].idString());
+                if (i < nodes.length - 1)
+                    b.append(',');
+            }
         }
         b.append("]");
         return b.toString();
     }
-
 }

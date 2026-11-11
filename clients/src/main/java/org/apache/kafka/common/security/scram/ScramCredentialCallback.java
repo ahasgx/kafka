@@ -14,18 +14,31 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.security.scram;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import javax.security.auth.callback.Callback;
 
+/**
+ * Callback used for SCRAM mechanisms.
+ */
+@InterfaceAudience.Public
 public class ScramCredentialCallback implements Callback {
     private ScramCredential scramCredential;
 
-    public ScramCredential scramCredential() {
-        return scramCredential;
-    }
-
+    /**
+     * Sets the SCRAM credential for this instance.
+     */
     public void scramCredential(ScramCredential scramCredential) {
         this.scramCredential = scramCredential;
+    }
+
+    /**
+     * Returns the SCRAM credential if set on this instance.
+     */
+    public ScramCredential scramCredential() {
+        return scramCredential;
     }
 }

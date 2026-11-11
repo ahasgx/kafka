@@ -17,17 +17,15 @@
 
 package org.apache.kafka.common.resource;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 import java.util.HashMap;
 import java.util.Locale;
 
 /**
  * Represents a type of resource which an ACL can be applied to.
- *
- * The API for this class is still evolving and we may break compatibility in minor releases, if necessary.
  */
-@InterfaceStability.Evolving
+@InterfaceAudience.Public
 public enum ResourceType {
     /**
      * Represents any ResourceType which this client cannot understand,
@@ -58,9 +56,19 @@ public enum ResourceType {
     /**
      * A transactional ID.
      */
-    TRANSACTIONAL_ID((byte) 5);
+    TRANSACTIONAL_ID((byte) 5),
 
-    private final static HashMap<Byte, ResourceType> CODE_TO_VALUE = new HashMap<>();
+    /**
+     * A token ID.
+     */
+    DELEGATION_TOKEN((byte) 6),
+
+    /**
+     * A user principal
+     */
+    USER((byte) 7);
+
+    private static final HashMap<Byte, ResourceType> CODE_TO_VALUE = new HashMap<>();
 
     static {
         for (ResourceType resourceType : ResourceType.values()) {

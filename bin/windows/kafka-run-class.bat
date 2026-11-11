@@ -27,7 +27,7 @@ set BASE_DIR=%CD%
 popd
 
 IF ["%SCALA_VERSION%"] EQU [""] (
-  set SCALA_VERSION=2.11.11
+  set SCALA_VERSION=2.13.18
 )
 
 IF ["%SCALA_BINARY_VERSION%"] EQU [""] (
@@ -43,60 +43,60 @@ IF ["%SCALA_BINARY_VERSION%"] EQU [""] (
 )
 
 rem Classpath addition for kafka-core dependencies
-for %%i in (%BASE_DIR%\core\build\dependant-libs-%SCALA_VERSION%\*.jar) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\core\build\dependant-libs-%SCALA_VERSION%\*.jar") do (
+	call :concat "%%i"
 )
 
 rem Classpath addition for kafka-examples
-for %%i in (%BASE_DIR%\examples\build\libs\kafka-examples*.jar) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\examples\build\libs\kafka-examples*.jar") do (
+	call :concat "%%i"
 )
 
 rem Classpath addition for kafka-clients
-for %%i in (%BASE_DIR%\clients\build\libs\kafka-clients*.jar) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\clients\build\libs\kafka-clients*.jar") do (
+	call :concat "%%i"
 )
 
 rem Classpath addition for kafka-streams
-for %%i in (%BASE_DIR%\streams\build\libs\kafka-streams*.jar) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\streams\build\libs\kafka-streams*.jar") do (
+	call :concat "%%i"
 )
 
 rem Classpath addition for kafka-streams-examples
-for %%i in (%BASE_DIR%\streams\examples\build\libs\kafka-streams-examples*.jar) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\streams\examples\build\libs\kafka-streams-examples*.jar") do (
+	call :concat "%%i"
 )
 
-for %%i in (%BASE_DIR%\streams\build\dependant-libs-%SCALA_VERSION%\rocksdb*.jar) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\streams\build\dependant-libs-%SCALA_VERSION%\rocksdb*.jar") do (
+	call :concat "%%i"
 )
 
 rem Classpath addition for kafka tools
-for %%i in (%BASE_DIR%\tools\build\libs\kafka-tools*.jar) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\tools\build\libs\kafka-tools*.jar") do (
+	call :concat "%%i"
 )
 
-for %%i in (%BASE_DIR%\tools\build\dependant-libs-%SCALA_VERSION%\*.jar) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\tools\build\dependant-libs-%SCALA_VERSION%\*.jar") do (
+	call :concat "%%i"
 )
 
 for %%p in (api runtime file json tools) do (
-	for %%i in (%BASE_DIR%\connect\%%p\build\libs\connect-%%p*.jar) do (
-		call :concat %%i
+	for %%i in ("%BASE_DIR%\connect\%%p\build\libs\connect-%%p*.jar") do (
+		call :concat "%%i"
 	)
 	if exist "%BASE_DIR%\connect\%%p\build\dependant-libs\*" (
-		call :concat %BASE_DIR%\connect\%%p\build\dependant-libs\*
+		call :concat "%BASE_DIR%\connect\%%p\build\dependant-libs\*"
 	)
 )
 
 rem Classpath addition for release
-for %%i in (%BASE_DIR%\libs\*) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\libs\*") do (
+	call :concat "%%i"
 )
 
 rem Classpath addition for core
-for %%i in (%BASE_DIR%\core\build\libs\kafka_%SCALA_BINARY_VERSION%*.jar) do (
-	call :concat %%i
+for %%i in ("%BASE_DIR%\core\build\libs\kafka_%SCALA_BINARY_VERSION%*.jar") do (
+	call :concat "%%i"
 )
 
 rem JMX settings
@@ -116,15 +116,24 @@ IF ["%LOG_DIR%"] EQU [""] (
 
 rem Log4j settings
 IF ["%KAFKA_LOG4J_OPTS%"] EQU [""] (
-	set KAFKA_LOG4J_OPTS=-Dlog4j.configuration=file:%BASE_DIR%/config/tools-log4j.properties
+	set KAFKA_LOG4J_OPTS=-Dlog4j2.configurationFile=file:%BASE_DIR%/config/tools-log4j2.yaml
 ) ELSE (
+    rem Check if Log4j 1.x configuration options are present in KAFKA_LOG4J_OPTS
+    echo %KAFKA_LOG4J_OPTS% | findstr /r /c:"log4j\.[^ ]*(\.properties|\.xml)$" >nul
+    IF %ERRORLEVEL% == 0 (
+        rem Enable Log4j 1.x configuration compatibility mode for Log4j 2
+        set LOG4J_COMPATIBILITY=true
+        echo DEPRECATED: A Log4j 1.x configuration file has been detected, which is no longer recommended. >&2
+        echo To use a Log4j 2.x configuration, please see https://logging.apache.org/log4j/2.x/migrate-from-log4j1.html#Log4j2ConfigurationFormat for details about Log4j configuration file migration. >&2
+        echo You can also use the %BASE_DIR%/config/tool-log4j2.yaml file as a starting point. Make sure to remove the Log4j 1.x configuration after completing the migration. >&2
+    )
   rem create logs directory
-  IF not exist %LOG_DIR% (
-      mkdir %LOG_DIR%
+  IF not exist "%LOG_DIR%" (
+      mkdir "%LOG_DIR%"
   )
 )
 
-set KAFKA_LOG4J_OPTS=-Dkafka.logs.dir=%LOG_DIR% %KAFKA_LOG4J_OPTS%
+set KAFKA_LOG4J_OPTS=-Dkafka.logs.dir="%LOG_DIR%" "%KAFKA_LOG4J_OPTS%"
 
 rem Generic jvm settings you want to add
 IF ["%KAFKA_OPTS%"] EQU [""] (
@@ -168,10 +177,10 @@ IF ["%KAFKA_HEAP_OPTS%"] EQU [""] (
 
 rem JVM performance options
 IF ["%KAFKA_JVM_PERFORMANCE_OPTS%"] EQU [""] (
-	set KAFKA_JVM_PERFORMANCE_OPTS=-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+DisableExplicitGC -Djava.awt.headless=true
+	set KAFKA_JVM_PERFORMANCE_OPTS=-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent
 )
 
-IF ["%CLASSPATH%"] EQU [""] (
+IF not defined CLASSPATH (
 	echo Classpath is empty. Please build the project first e.g. by running 'gradlew jarAll'
 	EXIT /B 2
 )
@@ -180,13 +189,12 @@ set COMMAND=%JAVA% %KAFKA_HEAP_OPTS% %KAFKA_JVM_PERFORMANCE_OPTS% %KAFKA_JMX_OPT
 rem echo.
 rem echo %COMMAND%
 rem echo.
-
 %COMMAND%
 
 goto :eof
 :concat
-IF ["%CLASSPATH%"] EQU [""] (
-  set "CLASSPATH=%1"
+IF not defined CLASSPATH (
+  set CLASSPATH="%~1"
 ) ELSE (
-  set "CLASSPATH=%CLASSPATH%;%1"
+  set CLASSPATH=%CLASSPATH%;"%~1"
 )

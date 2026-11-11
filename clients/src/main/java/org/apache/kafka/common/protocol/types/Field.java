@@ -16,58 +16,53 @@
  */
 package org.apache.kafka.common.protocol.types;
 
-/**
- * A field in a schema
- */
 public class Field {
-
-    public static final Object NO_DEFAULT = new Object();
-
-    final int index;
     public final String name;
+    public final String docString;
     public final Type type;
+    public final boolean hasDefaultValue;
     public final Object defaultValue;
-    public final String doc;
-    final Schema schema;
 
-    /**
-     * Create the field.
-     *
-     * @throws SchemaException If the default value is not primitive and the validation fails
-     */
-    public Field(int index, String name, Type type, String doc, Object defaultValue, Schema schema) {
-        this.index = index;
+    public Field(String name, Type type, String docString, boolean hasDefaultValue, Object defaultValue) {
         this.name = name;
+        this.docString = docString;
         this.type = type;
-        this.doc = doc;
+        this.hasDefaultValue = hasDefaultValue;
         this.defaultValue = defaultValue;
-        this.schema = schema;
-        if (defaultValue != NO_DEFAULT)
+
+        if (hasDefaultValue)
             type.validate(defaultValue);
     }
 
-    public Field(int index, String name, Type type, String doc, Object defaultValue) {
-        this(index, name, type, doc, defaultValue, null);
+    public Field(String name, Type type, String docString) {
+        this(name, type, docString, false, null);
     }
 
-    public Field(String name, Type type, String doc, Object defaultValue) {
-        this(-1, name, type, doc, defaultValue);
-    }
-
-    public Field(String name, Type type, String doc) {
-        this(name, type, doc, NO_DEFAULT);
+    public Field(String name, Type type, String docString, Object defaultValue) {
+        this(name, type, docString, true, defaultValue);
     }
 
     public Field(String name, Type type) {
-        this(name, type, "");
+        this(name, type, null, false, null);
     }
 
-    public Type type() {
-        return type;
-    }
+    public static class TaggedFieldsSection extends Field {
+        private static final String NAME = "_tagged_fields";
+        private static final String DOC_STRING = "The tagged fields";
 
-    public Schema schema() {
-        return schema;
-    }
+        /**
+         * Create a new TaggedFieldsSection with the given tags and fields.
+         *
+         * @param fields    This is an array containing Integer tags followed
+         *                  by associated Field objects.
+         * @return          The new {@link TaggedFieldsSection}
+         */
+        public static TaggedFieldsSection of(Object... fields) {
+            return new TaggedFieldsSection(TaggedFields.of(fields));
+        }
 
+        public TaggedFieldsSection(Type type) {
+            super(NAME, type, DOC_STRING, false, null);
+        }
+    }
 }

@@ -14,8 +14,10 @@
 # limitations under the License.
 
 from kafkatest.tests.kafka_test import KafkaTest
-from kafkatest.services.connect import ConnectDistributedService, ConnectRestError
+from kafkatest.services.connect import ConnectDistributedService, ConnectRestError, ConnectServiceBase
+from kafkatest.services.kafka import quorum
 from ducktape.utils.util import wait_until
+from ducktape.mark import matrix
 from ducktape.mark.resource import cluster
 from ducktape.cluster.remoteaccount import RemoteCommandError
 
@@ -31,14 +33,27 @@ class ConnectRestApiTest(KafkaTest):
     FILE_SOURCE_CONNECTOR = 'org.apache.kafka.connect.file.FileStreamSourceConnector'
     FILE_SINK_CONNECTOR = 'org.apache.kafka.connect.file.FileStreamSinkConnector'
 
-    FILE_SOURCE_CONFIGS = {'name', 'connector.class', 'tasks.max', 'key.converter', 'value.converter', 'topic', 'file', 'transforms'}
-    FILE_SINK_CONFIGS = {'name', 'connector.class', 'tasks.max', 'key.converter', 'value.converter', 'topics', 'file', 'transforms'}
+    FILE_SOURCE_CONFIGS = {'name', 'connector.class', 'tasks.max', 'key.converter', 'value.converter', 'header.converter', 'batch.size',
+                           'topic', 'file', 'transforms', 'config.action.reload', 'errors.retry.timeout', 'errors.retry.delay.max.ms',
+                           'errors.tolerance', 'errors.log.enable', 'errors.log.include.messages', 'predicates', 'topic.creation.groups',
+                           'exactly.once.support', 'transaction.boundary', 'transaction.boundary.interval.ms', 'offsets.storage.topic',
+                           'tasks.max.enforce', 'connector.plugin.version', 'key.converter.plugin.version', 'value.converter.plugin.version', 
+                           'header.converter.plugin.version'}
+    FILE_SINK_CONFIGS = {'name', 'connector.class', 'tasks.max', 'key.converter', 'value.converter', 'header.converter', 'topics',
+                         'file', 'transforms', 'topics.regex', 'config.action.reload', 'errors.retry.timeout', 'errors.retry.delay.max.ms',
+                         'errors.tolerance', 'errors.log.enable', 'errors.log.include.messages', 'errors.deadletterqueue.topic.name',
+                         'errors.deadletterqueue.topic.replication.factor', 'errors.deadletterqueue.context.headers.enable', 'predicates',
+                         'tasks.max.enforce', 'connector.plugin.version', 'key.converter.plugin.version', 'value.converter.plugin.version', 
+                           'header.converter.plugin.version'}
 
     INPUT_FILE = "/mnt/connect.input"
     INPUT_FILE2 = "/mnt/connect.input2"
     OUTPUT_FILE = "/mnt/connect.output"
 
-    TOPIC = "test"
+    TOPIC = "topic-${file:%s:topic.external}" % ConnectServiceBase.EXTERNAL_CONFIGS_FILE
+    TOPIC_TEST = "test"
+
+    DEFAULT_BATCH_SIZE = "2000"
     OFFSETS_TOPIC = "connect-offsets"
     OFFSETS_REPLICATION_FACTOR = "1"
     OFFSETS_PARTITIONS = "1"
@@ -57,27 +72,36 @@ class ConnectRestApiTest(KafkaTest):
 
     SCHEMA = {"type": "string", "optional": False}
 
+    CONNECT_PROTOCOL="compatible"
+
     def __init__(self, test_context):
-        super(ConnectRestApiTest, self).__init__(test_context, num_zk=1, num_brokers=1, topics={
+        super(ConnectRestApiTest, self).__init__(test_context, num_zk=0, num_brokers=1, topics={
             'test': {'partitions': 1, 'replication-factor': 1}
         })
 
-        self.cc = ConnectDistributedService(test_context, 2, self.kafka, [self.INPUT_FILE, self.INPUT_FILE2, self.OUTPUT_FILE])
+        self.cc = ConnectDistributedService(test_context, 2, self.kafka, [self.INPUT_FILE, self.INPUT_FILE2, self.OUTPUT_FILE],
+                                            include_filestream_connectors=True)
 
     @cluster(num_nodes=4)
-    def test_rest_api(self):
+    @matrix(connect_protocol=['compatible', 'eager'], metadata_quorum=quorum.all_non_upgrade)
+    def test_rest_api(self, connect_protocol, metadata_quorum):
         # Template parameters
         self.key_converter = "org.apache.kafka.connect.json.JsonConverter"
         self.value_converter = "org.apache.kafka.connect.json.JsonConverter"
         self.schemas = True
+        self.CONNECT_PROTOCOL = connect_protocol
 
         self.cc.set_configs(lambda node: self.render("connect-distributed.properties", node=node))
+        self.cc.set_external_configs(lambda node: self.render("connect-file-external.properties", node=node))
 
         self.cc.start()
 
         assert self.cc.list_connectors() == []
 
-        assert set([connector_plugin['class'] for connector_plugin in self.cc.list_connector_plugins()]) == {self.FILE_SOURCE_CONNECTOR, self.FILE_SINK_CONNECTOR}
+        # After MM2 and the connector classes that it added, the assertion here checks that the registered
+        # Connect plugins are a superset of the connectors expected to be present.
+        assert set([connector_plugin['class'] for connector_plugin in self.cc.list_connector_plugins()]).issuperset(
+            {self.FILE_SOURCE_CONNECTOR, self.FILE_SINK_CONNECTOR})
 
         source_connector_props = self.render("connect-file-source.properties")
         sink_connector_props = self.render("connect-file-sink.properties")
@@ -115,7 +139,8 @@ class ConnectRestApiTest(KafkaTest):
         expected_source_info = {
             'name': 'local-file-source',
             'config': self._config_dict_from_props(source_connector_props),
-            'tasks': [{'connector': 'local-file-source', 'task': 0}]
+            'tasks': [{'connector': 'local-file-source', 'task': 0}],
+            'type': 'source'
         }
         source_info = self.cc.get_connector("local-file-source")
         assert expected_source_info == source_info, "Incorrect info:" + json.dumps(source_info)
@@ -124,7 +149,8 @@ class ConnectRestApiTest(KafkaTest):
         expected_sink_info = {
             'name': 'local-file-sink',
             'config': self._config_dict_from_props(sink_connector_props),
-            'tasks': [{'connector': 'local-file-sink', 'task': 0}]
+            'tasks': [{'connector': 'local-file-sink', 'task': 0}],
+            'type': 'sink'
         }
         sink_info = self.cc.get_connector("local-file-sink")
         assert expected_sink_info == sink_info, "Incorrect info:" + json.dumps(sink_info)
@@ -137,9 +163,15 @@ class ConnectRestApiTest(KafkaTest):
         expected_source_task_info = [{
             'id': {'connector': 'local-file-source', 'task': 0},
             'config': {
+                'connector.class': 'org.apache.kafka.connect.file.FileStreamSourceConnector',
                 'task.class': 'org.apache.kafka.connect.file.FileStreamSourceTask',
                 'file': self.INPUT_FILE,
-                'topic': self.TOPIC
+                'topic': self.TOPIC,
+                'tasks.max': '1',
+                'name': 'local-file-source',
+                'errors.log.include.messages': 'true',
+                'errors.tolerance': 'none',
+                'errors.log.enable': 'true'
             }
         }]
         source_task_info = self.cc.get_connector_tasks("local-file-source")
@@ -147,9 +179,17 @@ class ConnectRestApiTest(KafkaTest):
         expected_sink_task_info = [{
             'id': {'connector': 'local-file-sink', 'task': 0},
             'config': {
+                'connector.class': 'org.apache.kafka.connect.file.FileStreamSinkConnector',
                 'task.class': 'org.apache.kafka.connect.file.FileStreamSinkTask',
                 'file': self.OUTPUT_FILE,
-                'topics': self.TOPIC
+                'topics': self.TOPIC,
+                'key.converter.schemas.enable': 'True',
+                'tasks.max': '1',
+                'name': 'local-file-sink',
+                'value.converter.schemas.enable':'True',
+                'errors.tolerance': 'none',
+                'errors.log.enable': 'true',
+                'errors.log.include.messages': 'true',
             }
         }]
         sink_task_info = self.cc.get_connector_tasks("local-file-sink")
@@ -167,7 +207,7 @@ class ConnectRestApiTest(KafkaTest):
 
         self.cc.delete_connector("local-file-source")
         self.cc.delete_connector("local-file-sink")
-        wait_until(lambda: len(self.cc.list_connectors()) == 0, timeout_sec=10, err_msg="Deleted connectors did not disappear from REST listing")
+        wait_until(lambda: not self.cc.list_connectors(), timeout_sec=10, err_msg="Deleted connectors did not disappear from REST listing")
 
     def validate_output(self, input):
         input_set = set(input)

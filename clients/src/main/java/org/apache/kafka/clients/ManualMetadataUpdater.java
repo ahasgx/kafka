@@ -16,12 +16,16 @@
  */
 package org.apache.kafka.clients;
 
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * A simple implementation of `MetadataUpdater` that returns the cluster nodes set via the constructor or via
@@ -33,11 +37,10 @@ import java.util.List;
  * This class is not thread-safe!
  */
 public class ManualMetadataUpdater implements MetadataUpdater {
-
     private List<Node> nodes;
 
     public ManualMetadataUpdater() {
-        this(new ArrayList<Node>(0));
+        this(new ArrayList<>(0));
     }
 
     public ManualMetadataUpdater(List<Node> nodes) {
@@ -64,17 +67,35 @@ public class ManualMetadataUpdater implements MetadataUpdater {
     }
 
     @Override
-    public void handleDisconnection(String destination) {
+    public void handleServerDisconnect(long now, String nodeId, Optional<AuthenticationException> maybeAuthException) {
+        // We don't fail the broker on failures. There should be sufficient information from
+        // the NetworkClient logs to indicate the reason for the failure.
+    }
+
+    @Override
+    public void handleFailedRequest(long now, Optional<KafkaException> maybeFatalException) {
         // Do nothing
     }
 
     @Override
-    public void handleCompletedMetadataResponse(RequestHeader requestHeader, long now, MetadataResponse response) {
+    public void handleSuccessfulResponse(RequestHeader requestHeader, long now, MetadataResponse response) {
         // Do nothing
     }
 
     @Override
-    public void requestUpdate() {
-        // Do nothing
+    public boolean isBootstrapped() {
+        // ManualMetadataUpdater is designed for cases where nodes are manually set,
+        // so we consider it bootstrapped if nodes have been provided
+        return !nodes.isEmpty();
+    }
+
+    @Override
+    public void bootstrap(List<InetSocketAddress> addresses) {
+        // ManualMetadataUpdater doesn't use NetworkClient's bootstrap mechanism
+        // Nodes should be set manually via constructor or setNodes()
+    }
+
+    @Override
+    public void close() {
     }
 }

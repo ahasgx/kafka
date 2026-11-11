@@ -16,151 +16,69 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.message.JoinGroupResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Struct;
+import org.apache.kafka.common.protocol.Readable;
 
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 public class JoinGroupResponse extends AbstractResponse {
 
-    private static final String ERROR_CODE_KEY_NAME = "error_code";
+    private final JoinGroupResponseData data;
 
-    /**
-     * Possible error codes:
-     *
-     * COORDINATOR_LOAD_IN_PROGRESS (14)
-     * GROUP_COORDINATOR_NOT_AVAILABLE (15)
-     * NOT_COORDINATOR (16)
-     * INCONSISTENT_GROUP_PROTOCOL (23)
-     * UNKNOWN_MEMBER_ID (25)
-     * INVALID_SESSION_TIMEOUT (26)
-     * GROUP_AUTHORIZATION_FAILED (30)
-     */
+    public JoinGroupResponse(JoinGroupResponseData data, short version) {
+        super(ApiKeys.JOIN_GROUP);
+        this.data = data;
 
-    private static final String GENERATION_ID_KEY_NAME = "generation_id";
-    private static final String GROUP_PROTOCOL_KEY_NAME = "group_protocol";
-    private static final String LEADER_ID_KEY_NAME = "leader_id";
-    private static final String MEMBER_ID_KEY_NAME = "member_id";
-    private static final String MEMBERS_KEY_NAME = "members";
-
-    private static final String MEMBER_METADATA_KEY_NAME = "member_metadata";
-
-    public static final String UNKNOWN_PROTOCOL = "";
-    public static final int UNKNOWN_GENERATION_ID = -1;
-    public static final String UNKNOWN_MEMBER_ID = "";
-
-    private final int throttleTimeMs;
-    private final Errors error;
-    private final int generationId;
-    private final String groupProtocol;
-    private final String memberId;
-    private final String leaderId;
-    private final Map<String, ByteBuffer> members;
-
-    public JoinGroupResponse(Errors error,
-                             int generationId,
-                             String groupProtocol,
-                             String memberId,
-                             String leaderId,
-                             Map<String, ByteBuffer> groupMembers) {
-        this(DEFAULT_THROTTLE_TIME, error, generationId, groupProtocol, memberId, leaderId, groupMembers);
-    }
-
-    public JoinGroupResponse(int throttleTimeMs,
-            Errors error,
-            int generationId,
-            String groupProtocol,
-            String memberId,
-            String leaderId,
-            Map<String, ByteBuffer> groupMembers) {
-        this.throttleTimeMs = throttleTimeMs;
-        this.error = error;
-        this.generationId = generationId;
-        this.groupProtocol = groupProtocol;
-        this.memberId = memberId;
-        this.leaderId = leaderId;
-        this.members = groupMembers;
-    }
-
-    public JoinGroupResponse(Struct struct) {
-        this.throttleTimeMs = struct.hasField(THROTTLE_TIME_KEY_NAME) ? struct.getInt(THROTTLE_TIME_KEY_NAME) : DEFAULT_THROTTLE_TIME;
-        members = new HashMap<>();
-
-        for (Object memberDataObj : struct.getArray(MEMBERS_KEY_NAME)) {
-            Struct memberData = (Struct) memberDataObj;
-            String memberId = memberData.getString(MEMBER_ID_KEY_NAME);
-            ByteBuffer memberMetadata = memberData.getBytes(MEMBER_METADATA_KEY_NAME);
-            members.put(memberId, memberMetadata);
+        // All versions prior to version 7 do not support nullable
+        // string for the protocol name. Empty string should be used.
+        if (version < 7 && data.protocolName() == null) {
+            data.setProtocolName("");
         }
-        error = Errors.forCode(struct.getShort(ERROR_CODE_KEY_NAME));
-        generationId = struct.getInt(GENERATION_ID_KEY_NAME);
-        groupProtocol = struct.getString(GROUP_PROTOCOL_KEY_NAME);
-        memberId = struct.getString(MEMBER_ID_KEY_NAME);
-        leaderId = struct.getString(LEADER_ID_KEY_NAME);
-    }
 
-    public int throttleTimeMs() {
-        return throttleTimeMs;
-    }
-
-    public Errors error() {
-        return error;
-    }
-
-    public int generationId() {
-        return generationId;
-    }
-
-    public String groupProtocol() {
-        return groupProtocol;
-    }
-
-    public String memberId() {
-        return memberId;
-    }
-
-    public String leaderId() {
-        return leaderId;
-    }
-
-    public boolean isLeader() {
-        return memberId.equals(leaderId);
-    }
-
-    public Map<String, ByteBuffer> members() {
-        return members;
-    }
-
-    public static JoinGroupResponse parse(ByteBuffer buffer, short version) {
-        return new JoinGroupResponse(ApiKeys.JOIN_GROUP.parseResponse(version, buffer));
+        // If nullable string for the protocol name is supported,
+        // we set empty string to be null to ensure compliance.
+        if (version >= 7 && data.protocolName() != null && data.protocolName().isEmpty()) {
+            data.setProtocolName(null);
+        }
     }
 
     @Override
-    protected Struct toStruct(short version) {
-        Struct struct = new Struct(ApiKeys.JOIN_GROUP.responseSchema(version));
-        if (struct.hasField(THROTTLE_TIME_KEY_NAME))
-            struct.set(THROTTLE_TIME_KEY_NAME, throttleTimeMs);
-
-        struct.set(ERROR_CODE_KEY_NAME, error.code());
-        struct.set(GENERATION_ID_KEY_NAME, generationId);
-        struct.set(GROUP_PROTOCOL_KEY_NAME, groupProtocol);
-        struct.set(MEMBER_ID_KEY_NAME, memberId);
-        struct.set(LEADER_ID_KEY_NAME, leaderId);
-
-        List<Struct> memberArray = new ArrayList<>();
-        for (Map.Entry<String, ByteBuffer> entries : members.entrySet()) {
-            Struct memberData = struct.instance(MEMBERS_KEY_NAME);
-            memberData.set(MEMBER_ID_KEY_NAME, entries.getKey());
-            memberData.set(MEMBER_METADATA_KEY_NAME, entries.getValue());
-            memberArray.add(memberData);
-        }
-        struct.set(MEMBERS_KEY_NAME, memberArray.toArray());
-
-        return struct;
+    public JoinGroupResponseData data() {
+        return data;
     }
+
+    public boolean isLeader() {
+        return data.memberId().equals(data.leader());
+    }
+
+    @Override
+    public int throttleTimeMs() {
+        return data.throttleTimeMs();
+    }
+
+    @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
+    }
+
+    public Errors error() {
+        return Errors.forCode(data.errorCode());
+    }
+
+    @Override
+    public Map<Errors, Integer> errorCounts() {
+        return errorCounts(Errors.forCode(data.errorCode()));
+    }
+
+    public static JoinGroupResponse parse(Readable readable, short version) {
+        return new JoinGroupResponse(new JoinGroupResponseData(readable, version), version);
+    }
+
+    @Override
+    public String toString() {
+        return data.toString();
+    }
+
 }

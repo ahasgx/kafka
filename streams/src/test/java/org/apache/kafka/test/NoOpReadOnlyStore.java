@@ -16,26 +16,47 @@
  */
 package org.apache.kafka.test;
 
-import org.apache.kafka.streams.processor.ProcessorContext;
+import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.Serializer;
+import org.apache.kafka.streams.processor.StateRestoreCallback;
 import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.processor.StateStoreContext;
+import org.apache.kafka.streams.query.Position;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
 
-public class NoOpReadOnlyStore<K, V>
-        implements ReadOnlyKeyValueStore<K, V>, StateStore {
+import java.io.File;
+import java.util.Map;
 
+public class NoOpReadOnlyStore<K, V> implements ReadOnlyKeyValueStore<K, V>, StateStore {
     private final String name;
+    private final boolean rocksdbStore;
+    private final StateRestoreCallback stateRestoreCallback;
     private boolean open = true;
     public boolean initialized;
-    public boolean flushed;
-
+    public boolean committed;
+    public IsolationLevel isolationLevel;
 
     public NoOpReadOnlyStore() {
-        this("");
+        this("", false);
     }
 
     public NoOpReadOnlyStore(final String name) {
+        this(name, false);
+    }
+
+    public NoOpReadOnlyStore(final String name,
+                             final boolean rocksdbStore) {
+        this(name, rocksdbStore, null);
+    }
+
+    public NoOpReadOnlyStore(final String name,
+                             final boolean rocksdbStore,
+                             final StateRestoreCallback stateRestoreCallback) {
         this.name = name;
+        this.rocksdbStore = rocksdbStore;
+        this.stateRestoreCallback = stateRestoreCallback;
     }
 
     @Override
@@ -45,6 +66,11 @@ public class NoOpReadOnlyStore<K, V>
 
     @Override
     public KeyValueIterator<K, V> range(final K from, final K to) {
+        return null;
+    }
+
+    @Override
+    public <PS extends Serializer<P>, P> KeyValueIterator<K, V> prefixScan(P prefix, PS prefixKeySerializer) {
         return null;
     }
 
@@ -64,13 +90,20 @@ public class NoOpReadOnlyStore<K, V>
     }
 
     @Override
-    public void init(final ProcessorContext context, final StateStore root) {
+    public void init(final StateStoreContext stateStoreContext, final StateStore root) {
+        if (rocksdbStore) {
+            // cf. RocksDBStore
+            new File(stateStoreContext.stateDir() + File.separator + "rocksdb" + File.separator + name).mkdirs();
+        } else {
+            new File(stateStoreContext.stateDir() + File.separator + name).mkdir();
+        }
         this.initialized = true;
+        stateStoreContext.register(root, stateRestoreCallback != null ? stateRestoreCallback : (k, v) -> { });
     }
 
     @Override
-    public void flush() {
-        flushed = true;
+    public void commit(final Map<TopicPartition, Long> changelogOffsets) {
+        committed = true;
     }
 
     @Override
@@ -80,12 +113,23 @@ public class NoOpReadOnlyStore<K, V>
 
     @Override
     public boolean persistent() {
-        return false;
+        return rocksdbStore;
     }
 
     @Override
     public boolean isOpen() {
         return open;
+    }
+
+    @Override
+    public Position getPosition() {
+        throw new UnsupportedOperationException("Position handling not implemented");
+    }
+
+    @Override
+    public ReadOnlyKeyValueStore<K, V> readOnly(final IsolationLevel level) {
+        this.isolationLevel = level;
+        return this;
     }
 
 }

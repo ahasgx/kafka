@@ -16,157 +16,313 @@
  */
 package org.apache.kafka.common.requests;
 
-import org.apache.kafka.common.network.Send;
+import org.apache.kafka.clients.NodeApiVersions;
+import org.apache.kafka.common.feature.Features;
+import org.apache.kafka.common.feature.SupportedVersionRange;
+import org.apache.kafka.common.message.ApiMessageType;
+import org.apache.kafka.common.message.ApiMessageType.ListenerType;
+import org.apache.kafka.common.message.ApiVersionsResponseData;
+import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersion;
+import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersionCollection;
+import org.apache.kafka.common.message.ApiVersionsResponseData.FinalizedFeatureKey;
+import org.apache.kafka.common.message.ApiVersionsResponseData.FinalizedFeatureKeyCollection;
+import org.apache.kafka.common.message.ApiVersionsResponseData.SupportedFeatureKey;
+import org.apache.kafka.common.message.ApiVersionsResponseData.SupportedFeatureKeyCollection;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Struct;
-import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.protocol.Readable;
 
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 
+/**
+ * Possible error codes:
+ * - {@link Errors#UNSUPPORTED_VERSION}
+ * - {@link Errors#INVALID_REQUEST}
+ */
 public class ApiVersionsResponse extends AbstractResponse {
 
-    public static final ApiVersionsResponse API_VERSIONS_RESPONSE = createApiVersionsResponse(DEFAULT_THROTTLE_TIME, RecordBatch.CURRENT_MAGIC_VALUE);
-    private static final String THROTTLE_TIME_KEY_NAME = "throttle_time_ms";
-    public static final String ERROR_CODE_KEY_NAME = "error_code";
-    public static final String API_VERSIONS_KEY_NAME = "api_versions";
-    public static final String API_KEY_NAME = "api_key";
-    public static final String MIN_VERSION_KEY_NAME = "min_version";
-    public static final String MAX_VERSION_KEY_NAME = "max_version";
+    public static final long UNKNOWN_FINALIZED_FEATURES_EPOCH = -1L;
 
-    /**
-     * Possible error codes:
-     *
-     * UNSUPPORTED_VERSION (33)
-     */
-    private final Errors error;
-    private final int throttleTimeMs;
-    private final Map<Short, ApiVersion> apiKeyToApiVersion;
+    private final ApiVersionsResponseData data;
 
-    public static final class ApiVersion {
-        public final short apiKey;
-        public final short minVersion;
-        public final short maxVersion;
+    public static class Builder {
+        private Errors error = Errors.NONE;
+        private int throttleTimeMs = 0;
+        private ApiVersionCollection apiVersions = null;
+        private Features<SupportedVersionRange> supportedFeatures = null;
+        private Map<String, Short> finalizedFeatures = null;
+        private long finalizedFeaturesEpoch = 0;
+        private boolean zkMigrationEnabled = false;
+        private boolean alterFeatureLevel0 = false;
 
-        public ApiVersion(ApiKeys apiKey) {
-            this(apiKey.id, apiKey.oldestVersion(), apiKey.latestVersion());
+        public Builder setError(Errors error) {
+            this.error = error;
+            return this;
         }
 
-        public ApiVersion(short apiKey, short minVersion, short maxVersion) {
-            this.apiKey = apiKey;
-            this.minVersion = minVersion;
-            this.maxVersion = maxVersion;
+        public Builder setThrottleTimeMs(int throttleTimeMs) {
+            this.throttleTimeMs = throttleTimeMs;
+            return this;
         }
 
-        @Override
-        public String toString() {
-            return "ApiVersion(" +
-                    "apiKey=" + apiKey +
-                    ", minVersion=" + minVersion +
-                    ", maxVersion= " + maxVersion +
-                    ")";
+        public Builder setApiVersions(ApiVersionCollection apiVersions) {
+            this.apiVersions = apiVersions;
+            return this;
+        }
+
+        public Builder setSupportedFeatures(Features<SupportedVersionRange> supportedFeatures) {
+            this.supportedFeatures = supportedFeatures;
+            return this;
+        }
+
+        public Builder setFinalizedFeatures(Map<String, Short> finalizedFeatures) {
+            this.finalizedFeatures = finalizedFeatures;
+            return this;
+        }
+
+        public Builder setFinalizedFeaturesEpoch(long finalizedFeaturesEpoch) {
+            this.finalizedFeaturesEpoch = finalizedFeaturesEpoch;
+            return this;
+        }
+
+        public Builder setZkMigrationEnabled(boolean zkMigrationEnabled) {
+            this.zkMigrationEnabled = zkMigrationEnabled;
+            return this;
+        }
+
+        public Builder setAlterFeatureLevel0(boolean alterFeatureLevel0) {
+            this.alterFeatureLevel0 = alterFeatureLevel0;
+            return this;
+        }
+
+        public ApiVersionsResponse build() {
+            final ApiVersionsResponseData data = new ApiVersionsResponseData();
+            data.setErrorCode(error.code());
+            data.setApiKeys(Objects.requireNonNull(apiVersions));
+            data.setThrottleTimeMs(throttleTimeMs);
+            data.setSupportedFeatures(
+                maybeFilterSupportedFeatureKeys(Objects.requireNonNull(supportedFeatures), alterFeatureLevel0));
+            data.setFinalizedFeatures(
+                createFinalizedFeatureKeys(Objects.requireNonNull(finalizedFeatures)));
+            data.setFinalizedFeaturesEpoch(finalizedFeaturesEpoch);
+            data.setZkMigrationReady(zkMigrationEnabled);
+            return new ApiVersionsResponse(data);
         }
     }
 
-    public ApiVersionsResponse(Errors error, List<ApiVersion> apiVersions) {
-        this(DEFAULT_THROTTLE_TIME, error, apiVersions);
-    }
-
-    public ApiVersionsResponse(int throttleTimeMs, Errors error, List<ApiVersion> apiVersions) {
-        this.throttleTimeMs = throttleTimeMs;
-        this.error = error;
-        this.apiKeyToApiVersion = buildApiKeyToApiVersion(apiVersions);
-    }
-
-    public ApiVersionsResponse(Struct struct) {
-        this.throttleTimeMs = struct.hasField(THROTTLE_TIME_KEY_NAME) ? struct.getInt(THROTTLE_TIME_KEY_NAME) : DEFAULT_THROTTLE_TIME;
-        this.error = Errors.forCode(struct.getShort(ERROR_CODE_KEY_NAME));
-        List<ApiVersion> tempApiVersions = new ArrayList<>();
-        for (Object apiVersionsObj : struct.getArray(API_VERSIONS_KEY_NAME)) {
-            Struct apiVersionStruct = (Struct) apiVersionsObj;
-            short apiKey = apiVersionStruct.getShort(API_KEY_NAME);
-            short minVersion = apiVersionStruct.getShort(MIN_VERSION_KEY_NAME);
-            short maxVersion = apiVersionStruct.getShort(MAX_VERSION_KEY_NAME);
-            tempApiVersions.add(new ApiVersion(apiKey, minVersion, maxVersion));
-        }
-        this.apiKeyToApiVersion = buildApiKeyToApiVersion(tempApiVersions);
+    public ApiVersionsResponse(ApiVersionsResponseData data) {
+        super(ApiKeys.API_VERSIONS);
+        this.data = data;
     }
 
     @Override
-    protected Struct toStruct(short version) {
-        Struct struct = new Struct(ApiKeys.API_VERSIONS.responseSchema(version));
-        if (struct.hasField(THROTTLE_TIME_KEY_NAME))
-            struct.set(THROTTLE_TIME_KEY_NAME, throttleTimeMs);
-        struct.set(ERROR_CODE_KEY_NAME, error.code());
-        List<Struct> apiVersionList = new ArrayList<>();
-        for (ApiVersion apiVersion : apiKeyToApiVersion.values()) {
-            Struct apiVersionStruct = struct.instance(API_VERSIONS_KEY_NAME);
-            apiVersionStruct.set(API_KEY_NAME, apiVersion.apiKey);
-            apiVersionStruct.set(MIN_VERSION_KEY_NAME, apiVersion.minVersion);
-            apiVersionStruct.set(MAX_VERSION_KEY_NAME, apiVersion.maxVersion);
-            apiVersionList.add(apiVersionStruct);
-        }
-        struct.set(API_VERSIONS_KEY_NAME, apiVersionList.toArray());
-        return struct;
-    }
-
-    public static ApiVersionsResponse apiVersionsResponse(int throttleTimeMs, byte maxMagic) {
-        if (maxMagic == RecordBatch.CURRENT_MAGIC_VALUE && throttleTimeMs == DEFAULT_THROTTLE_TIME) {
-            return API_VERSIONS_RESPONSE;
-        }
-        return createApiVersionsResponse(throttleTimeMs, maxMagic);
-    }
-
-    /**
-     * Returns Errors.UNSUPPORTED_VERSION response with version 0 since we don't support the requested version.
-     */
-    public static Send unsupportedVersionSend(String destination, RequestHeader requestHeader) {
-        ApiVersionsResponse response = new ApiVersionsResponse(DEFAULT_THROTTLE_TIME, Errors.UNSUPPORTED_VERSION,
-                Collections.<ApiVersion>emptyList());
-        return response.toSend(destination, (short) 0, requestHeader.toResponseHeader());
-    }
-
-    public int throttleTimeMs() {
-        return throttleTimeMs;
-    }
-
-    public Collection<ApiVersion> apiVersions() {
-        return apiKeyToApiVersion.values();
+    public ApiVersionsResponseData data() {
+        return data;
     }
 
     public ApiVersion apiVersion(short apiKey) {
-        return apiKeyToApiVersion.get(apiKey);
+        return data.apiKeys().find(apiKey);
     }
 
-    public Errors error() {
-        return error;
+    @Override
+    public Map<Errors, Integer> errorCounts() {
+        return errorCounts(Errors.forCode(this.data.errorCode()));
     }
 
-    public static ApiVersionsResponse parse(ByteBuffer buffer, short version) {
-        return new ApiVersionsResponse(ApiKeys.API_VERSIONS.parseResponse(version, buffer));
+    @Override
+    public int throttleTimeMs() {
+        return this.data.throttleTimeMs();
     }
 
-    public static ApiVersionsResponse createApiVersionsResponse(int throttleTimeMs, final byte minMagic) {
-        List<ApiVersion> versionList = new ArrayList<>();
-        for (ApiKeys apiKey : ApiKeys.values()) {
-            if (apiKey.minRequiredInterBrokerMagic <= minMagic) {
-                versionList.add(new ApiVersion(apiKey));
+    @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
+    }
+
+    public boolean zkMigrationReady() {
+        return data.zkMigrationReady();
+    }
+
+    public static ApiVersionsResponse parse(Readable readable, short version) {
+        // Fallback to version 0 for ApiVersions response. If a client sends an ApiVersionsRequest
+        // using a version higher than that supported by the broker, a version 0 response is sent
+        // to the client indicating UNSUPPORTED_VERSION. When the client receives the response, it
+        // falls back while parsing it which means that the version received by this
+        // method is not necessarily the real one. It may be version 0 as well.
+        Readable readableCopy = readable.slice();
+        try {
+            return new ApiVersionsResponse(new ApiVersionsResponseData(readable, version));
+        } catch (RuntimeException e) {
+            if (version != 0)
+                return new ApiVersionsResponse(new ApiVersionsResponseData(readableCopy, (short) 0));
+            else
+                throw e;
+        }
+    }
+
+    public static ApiVersionCollection controllerApiVersions(
+        NodeApiVersions controllerApiVersions,
+        ListenerType listenerType,
+        boolean enableUnstableLastVersion,
+        boolean clientTelemetryEnabled
+    ) {
+        return intersectForwardableApis(
+            listenerType,
+            controllerApiVersions.allSupportedApiVersions(),
+            enableUnstableLastVersion,
+            clientTelemetryEnabled);
+    }
+
+    public static ApiVersionCollection brokerApiVersions(
+        ListenerType listenerType,
+        boolean enableUnstableLastVersion,
+        boolean clientTelemetryEnabled
+    ) {
+        return filterApis(
+            listenerType,
+            enableUnstableLastVersion,
+            clientTelemetryEnabled);
+    }
+
+    public static ApiVersionCollection filterApis(
+        ApiMessageType.ListenerType listenerType,
+        boolean enableUnstableLastVersion,
+        boolean clientTelemetryEnabled
+    ) {
+        ApiVersionCollection apiKeys = new ApiVersionCollection();
+        for (ApiKeys apiKey : ApiKeys.apisForListener(listenerType)) {
+            // Skip telemetry APIs if client telemetry is disabled.
+            if ((apiKey == ApiKeys.GET_TELEMETRY_SUBSCRIPTIONS || apiKey == ApiKeys.PUSH_TELEMETRY) && !clientTelemetryEnabled)
+                continue;
+            apiKey.toApiVersionForApiResponse(enableUnstableLastVersion, listenerType).ifPresent(apiKeys::add);
+        }
+        return apiKeys;
+    }
+
+    public static ApiVersionCollection collectApis(
+        ApiMessageType.ListenerType listenerType,
+        Set<ApiKeys> apiKeys,
+        boolean enableUnstableLastVersion
+    ) {
+        ApiVersionCollection res = new ApiVersionCollection();
+        for (ApiKeys apiKey : apiKeys) {
+            apiKey.toApiVersionForApiResponse(enableUnstableLastVersion, listenerType).ifPresent(res::add);
+        }
+        return res;
+    }
+
+    /**
+     * Find the common range of supported API versions between the locally
+     * known range and that of another set.
+     *
+     * @param listenerType the listener type which constrains the set of exposed APIs
+     * @param activeControllerApiVersions controller ApiVersions
+     * @param enableUnstableLastVersion whether unstable versions should be advertised or not
+     * @param clientTelemetryEnabled whether client telemetry is enabled or not
+     * @return commonly agreed ApiVersion collection
+     */
+    public static ApiVersionCollection intersectForwardableApis(
+        final ApiMessageType.ListenerType listenerType,
+        final Map<ApiKeys, ApiVersion> activeControllerApiVersions,
+        boolean enableUnstableLastVersion,
+        boolean clientTelemetryEnabled
+    ) {
+        ApiVersionCollection apiKeys = new ApiVersionCollection();
+        for (ApiKeys apiKey : ApiKeys.apisForListener(listenerType)) {
+            final Optional<ApiVersion> brokerApiVersion = apiKey.toApiVersionForApiResponse(enableUnstableLastVersion, listenerType);
+            if (brokerApiVersion.isEmpty()) {
+                // Broker does not support this API key.
+                continue;
+            }
+
+            // Skip telemetry APIs if client telemetry is disabled.
+            if ((apiKey == ApiKeys.GET_TELEMETRY_SUBSCRIPTIONS || apiKey == ApiKeys.PUSH_TELEMETRY) && !clientTelemetryEnabled)
+                continue;
+
+            final ApiVersion finalApiVersion;
+            if (!apiKey.forwardable) {
+                finalApiVersion = brokerApiVersion.get();
+            } else {
+                Optional<ApiVersion> intersectVersion = intersect(
+                    brokerApiVersion.get(),
+                    activeControllerApiVersions.getOrDefault(apiKey, null)
+                );
+                if (intersectVersion.isPresent()) {
+                    finalApiVersion = intersectVersion.get();
+                } else {
+                    // Controller doesn't support this API key, or there is no intersection.
+                    continue;
+                }
+            }
+
+            apiKeys.add(finalApiVersion.duplicate());
+        }
+        return apiKeys;
+    }
+
+    private static SupportedFeatureKeyCollection maybeFilterSupportedFeatureKeys(
+        Features<SupportedVersionRange> latestSupportedFeatures,
+        boolean alterV0
+    ) {
+        SupportedFeatureKeyCollection converted = new SupportedFeatureKeyCollection();
+        for (Map.Entry<String, SupportedVersionRange> feature : latestSupportedFeatures.features().entrySet()) {
+            final SupportedVersionRange versionRange = feature.getValue();
+            if (alterV0 && versionRange.min() == 0) {
+                // Some older clients will have deserialization problems if a feature's
+                // minimum supported level is 0. Therefore, when preparing ApiVersionResponse
+                // at versions less than 4, we must omit these features. See KAFKA-17492.
+            } else {
+                final SupportedFeatureKey key = new SupportedFeatureKey();
+                key.setName(feature.getKey());
+                key.setMinVersion(versionRange.min());
+                key.setMaxVersion(versionRange.max());
+                converted.add(key);
             }
         }
-        return new ApiVersionsResponse(throttleTimeMs, Errors.NONE, versionList);
+
+        return converted;
     }
 
-    private Map<Short, ApiVersion> buildApiKeyToApiVersion(List<ApiVersion> apiVersions) {
-        Map<Short, ApiVersion> tempApiIdToApiVersion = new HashMap<>();
-        for (ApiVersion apiVersion: apiVersions) {
-            tempApiIdToApiVersion.put(apiVersion.apiKey, apiVersion);
+    private static FinalizedFeatureKeyCollection createFinalizedFeatureKeys(
+        Map<String, Short> finalizedFeatures) {
+        FinalizedFeatureKeyCollection converted = new FinalizedFeatureKeyCollection();
+        for (Map.Entry<String, Short> feature : finalizedFeatures.entrySet()) {
+            final FinalizedFeatureKey key = new FinalizedFeatureKey();
+            final short versionLevel = feature.getValue();
+            if (versionLevel != 0) {
+                key.setName(feature.getKey());
+                key.setMinVersionLevel(versionLevel);
+                key.setMaxVersionLevel(versionLevel);
+                converted.add(key);
+            }
         }
-        return tempApiIdToApiVersion;
+
+        return converted;
+    }
+
+    public static Optional<ApiVersion> intersect(ApiVersion thisVersion,
+                                                 ApiVersion other) {
+        if (thisVersion == null || other == null) return Optional.empty();
+        if (thisVersion.apiKey() != other.apiKey())
+            throw new IllegalArgumentException("thisVersion.apiKey: " + thisVersion.apiKey()
+                + " must be equal to other.apiKey: " + other.apiKey());
+        short minVersion = (short) Math.max(thisVersion.minVersion(), other.minVersion());
+        short maxVersion = (short) Math.min(thisVersion.maxVersion(), other.maxVersion());
+        return minVersion > maxVersion
+                ? Optional.empty()
+                : Optional.of(new ApiVersion()
+                    .setApiKey(thisVersion.apiKey())
+                    .setMinVersion(minVersion)
+                    .setMaxVersion(maxVersion));
+    }
+
+    public static ApiVersion toApiVersion(ApiKeys apiKey) {
+        return new ApiVersion()
+            .setApiKey(apiKey.id)
+            .setMinVersion(apiKey.oldestVersion())
+            .setMaxVersion(apiKey.latestVersion());
     }
 }

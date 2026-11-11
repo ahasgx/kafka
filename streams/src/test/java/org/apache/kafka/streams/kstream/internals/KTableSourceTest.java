@@ -16,192 +16,286 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
-import org.apache.kafka.common.serialization.Serde;
+import org.apache.kafka.common.header.internals.RecordHeaders;
+import org.apache.kafka.common.serialization.IntegerSerializer;
 import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.common.utils.Utils;
-import org.apache.kafka.streams.kstream.KStreamBuilder;
+import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.common.utils.LogCaptureAppender;
+import org.apache.kafka.streams.KeyValueTimestamp;
+import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.TestInputTopic;
+import org.apache.kafka.streams.Topology;
+import org.apache.kafka.streams.TopologyTestDriver;
+import org.apache.kafka.streams.TopologyTestDriverBuilder;
+import org.apache.kafka.streams.TopologyTestDriverWrapper;
+import org.apache.kafka.streams.TopologyWrapper;
+import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KTable;
-import org.apache.kafka.test.KStreamTestDriver;
-import org.apache.kafka.test.MockProcessorSupplier;
-import org.apache.kafka.test.TestUtils;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.kafka.streams.kstream.Materialized;
+import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
+import org.apache.kafka.streams.state.ValueTimestampHeaders;
+import org.apache.kafka.test.MockApiProcessor;
+import org.apache.kafka.test.MockApiProcessorSupplier;
+import org.apache.kafka.test.StreamsTestUtils;
 
-import java.io.File;
-import java.io.IOException;
+import org.apache.logging.log4j.Level;
+import org.junit.jupiter.api.Test;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Properties;
+
+import static java.util.Arrays.asList;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class KTableSourceTest {
-
-    final private Serde<String> stringSerde = Serdes.String();
-    final private Serde<Integer> intSerde = Serdes.Integer();
-
-    private KStreamTestDriver driver = null;
-    private File stateDir = null;
-
-    @After
-    public void tearDown() {
-        if (driver != null) {
-            driver.close();
-        }
-        driver = null;
-    }
-
-    @Before
-    public void setUp() throws IOException {
-        stateDir = TestUtils.tempDirectory("kafka-test");
-    }
+    private final Consumed<String, String> stringConsumed = Consumed.with(Serdes.String(), Serdes.String());
+    private final Properties props = StreamsTestUtils.getStreamsConfig(Serdes.String(), Serdes.String());
 
     @Test
     public void testKTable() {
-        final KStreamBuilder builder = new KStreamBuilder();
+        final StreamsBuilder builder = new StreamsBuilder();
+        final String topic1 = "topic1";
 
-        String topic1 = "topic1";
+        final KTable<String, Integer> table1 = builder.table(topic1, Consumed.with(Serdes.String(), Serdes.Integer()));
 
-        KTable<String, Integer> table1 = builder.table(stringSerde, intSerde, topic1, "anyStoreName");
+        final MockApiProcessorSupplier<String, Integer, Void, Void> supplier = new MockApiProcessorSupplier<>();
+        table1.toStream().process(supplier);
 
-        MockProcessorSupplier<String, Integer> proc1 = new MockProcessorSupplier<>();
-        table1.toStream().process(proc1);
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
+            final TestInputTopic<String, Integer> inputTopic =
+                    driver.createInputTopic(topic1, new StringSerializer(), new IntegerSerializer());
+            inputTopic.pipeInput("A", 1, 10L);
+            inputTopic.pipeInput("B", 2, 11L);
+            inputTopic.pipeInput("C", 3, 12L);
+            inputTopic.pipeInput("D", 4, 13L);
+            inputTopic.pipeInput("A", null, 14L);
+            inputTopic.pipeInput("B", null, 15L);
+        }
 
-        driver = new KStreamTestDriver(builder, stateDir);
-        driver.process(topic1, "A", 1);
-        driver.process(topic1, "B", 2);
-        driver.process(topic1, "C", 3);
-        driver.process(topic1, "D", 4);
-        driver.flushState();
-        driver.process(topic1, "A", null);
-        driver.process(topic1, "B", null);
-        driver.flushState();
-
-        assertEquals(Utils.mkList("A:1", "B:2", "C:3", "D:4", "A:null", "B:null"), proc1.processed);
+        assertEquals(
+            asList(new KeyValueTimestamp<>("A", 1, 10L),
+                new KeyValueTimestamp<>("B", 2, 11L),
+                new KeyValueTimestamp<>("C", 3, 12L),
+                new KeyValueTimestamp<>("D", 4, 13L),
+                new KeyValueTimestamp<>("A", null, 14L),
+                new KeyValueTimestamp<>("B", null, 15L)),
+            supplier.theCapturedProcessor().processed());
     }
 
     @Test
-    public void testValueGetter() throws IOException {
-        final KStreamBuilder builder = new KStreamBuilder();
+    public void kTableShouldLogAndMeterOnSkippedRecords() {
+        final StreamsBuilder builder = new StreamsBuilder();
+        final String topic = "topic";
+        builder.table(topic, stringConsumed);
 
-        String topic1 = "topic1";
+        try (final LogCaptureAppender appender = LogCaptureAppender.createAndRegister(KTableSource.class);
+             final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
 
-        KTableImpl<String, String, String> table1 = (KTableImpl<String, String, String>) builder.table(stringSerde, stringSerde, topic1, "anyStoreName");
+            final TestInputTopic<String, String> inputTopic =
+                driver.createInputTopic(
+                    topic,
+                    new StringSerializer(),
+                    new StringSerializer(),
+                    Instant.ofEpochMilli(0L),
+                    Duration.ZERO
+                );
+            inputTopic.pipeInput(null, "value");
 
-        KTableValueGetterSupplier<String, String> getterSupplier1 = table1.valueGetterSupplier();
-
-        driver = new KStreamTestDriver(builder, stateDir, null, null);
-        KTableValueGetter<String, String> getter1 = getterSupplier1.get();
-        getter1.init(driver.context());
-
-        driver.process(topic1, "A", "01");
-        driver.process(topic1, "B", "01");
-        driver.process(topic1, "C", "01");
-
-        assertEquals("01", getter1.get("A"));
-        assertEquals("01", getter1.get("B"));
-        assertEquals("01", getter1.get("C"));
-
-        driver.process(topic1, "A", "02");
-        driver.process(topic1, "B", "02");
-
-        assertEquals("02", getter1.get("A"));
-        assertEquals("02", getter1.get("B"));
-        assertEquals("01", getter1.get("C"));
-
-        driver.process(topic1, "A", "03");
-
-        assertEquals("03", getter1.get("A"));
-        assertEquals("02", getter1.get("B"));
-        assertEquals("01", getter1.get("C"));
-
-        driver.process(topic1, "A", null);
-        driver.process(topic1, "B", null);
-
-        assertNull(getter1.get("A"));
-        assertNull(getter1.get("B"));
-        assertEquals("01", getter1.get("C"));
-
+            assertTrue(appender.getMessages(Level.WARN).contains(
+                "Skipping record due to null key. topic=[topic] partition=[0] offset=[0]"));
+        }
     }
 
     @Test
-    public void testNotSendingOldValue() throws IOException {
-        final KStreamBuilder builder = new KStreamBuilder();
+    public void kTableShouldLogOnOutOfOrder() {
+        final StreamsBuilder builder = new StreamsBuilder();
+        final String topic = "topic";
+        builder.table(topic, stringConsumed, Materialized.as("store"));
 
-        String topic1 = "topic1";
+        try (final LogCaptureAppender appender = LogCaptureAppender.createAndRegister(KTableSource.class);
+            final TopologyTestDriver driver = new TopologyTestDriverBuilder(builder.build()).withConfig(props).build()) {
 
-        KTableImpl<String, String, String> table1 = (KTableImpl<String, String, String>) builder.table(stringSerde, stringSerde, topic1, "anyStoreName");
+            final TestInputTopic<String, String> inputTopic =
+                driver.createInputTopic(
+                    topic,
+                    new StringSerializer(),
+                    new StringSerializer(),
+                    Instant.ofEpochMilli(0L),
+                    Duration.ZERO
+                );
+            inputTopic.pipeInput("key", "value", 10L);
+            inputTopic.pipeInput("key", "value", 5L);
 
-        MockProcessorSupplier<String, Integer> proc1 = new MockProcessorSupplier<>();
-
-        builder.addProcessor("proc1", proc1, table1.name);
-
-        driver = new KStreamTestDriver(builder, stateDir, null, null);
-        driver.process(topic1, "A", "01");
-        driver.process(topic1, "B", "01");
-        driver.process(topic1, "C", "01");
-        driver.flushState();
-
-        proc1.checkAndClearProcessResult("A:(01<-null)", "B:(01<-null)", "C:(01<-null)");
-
-        driver.process(topic1, "A", "02");
-        driver.process(topic1, "B", "02");
-        driver.flushState();
-
-        proc1.checkAndClearProcessResult("A:(02<-null)", "B:(02<-null)");
-
-        driver.process(topic1, "A", "03");
-        driver.flushState();
-
-        proc1.checkAndClearProcessResult("A:(03<-null)");
-
-        driver.process(topic1, "A", null);
-        driver.process(topic1, "B", null);
-        driver.flushState();
-
-        proc1.checkAndClearProcessResult("A:(null<-null)", "B:(null<-null)");
+            assertTrue(appender.getMessages(Level.WARN).contains(
+                "Detected out-of-order KTable update for store, old timestamp=[10] new timestamp=[5]. topic=[topic] partition=[0] offset=[1]."));
+        }
     }
 
     @Test
-    public void testSendingOldValue() throws IOException {
-        final KStreamBuilder builder = new KStreamBuilder();
+    public void testValueGetter() {
+        final StreamsBuilder builder = new StreamsBuilder();
+        final String topic1 = "topic1";
 
-        String topic1 = "topic1";
+        @SuppressWarnings("unchecked")
+        final KTableImpl<String, String, String> table1 =
+            (KTableImpl<String, String, String>) builder.table(topic1, stringConsumed, Materialized.as("store"));
 
-        KTableImpl<String, String, String> table1 = (KTableImpl<String, String, String>) builder.table(stringSerde, stringSerde, topic1, "anyStoreName");
+        final Topology topology = builder.build();
+        final KTableValueGetterSupplier<String, String> getterSupplier1 = table1.valueGetterSupplier();
 
-        table1.enableSendingOldValues();
+        final InternalTopologyBuilder topologyBuilder = TopologyWrapper.getInternalTopologyBuilder(topology);
+        topologyBuilder.connectProcessorAndStateStores(table1.name, getterSupplier1.storeNames());
 
+        try (final TopologyTestDriverWrapper driver = new TopologyTestDriverWrapper(builder.build(), props)) {
+            final TestInputTopic<String, String> inputTopic1 =
+                driver.createInputTopic(
+                    topic1,
+                    new StringSerializer(),
+                    new StringSerializer(),
+                    Instant.ofEpochMilli(0L),
+                    Duration.ZERO
+                );
+            final KTableValueGetter<String, String> getter1 = getterSupplier1.get();
+            getter1.init(driver.setCurrentNodeForProcessorContext(table1.name));
+
+            inputTopic1.pipeInput("A", "01", 10L);
+            inputTopic1.pipeInput("B", "01", 20L);
+            inputTopic1.pipeInput("C", "01", 15L);
+
+            assertEquals(ValueTimestampHeaders.make("01", 10L, new RecordHeaders()), getter1.get("A"));
+            assertEquals(ValueTimestampHeaders.make("01", 20L, new RecordHeaders()), getter1.get("B"));
+            assertEquals(ValueTimestampHeaders.make("01", 15L, new RecordHeaders()), getter1.get("C"));
+
+            inputTopic1.pipeInput("A", "02", 30L);
+            inputTopic1.pipeInput("B", "02", 5L);
+
+            assertEquals(ValueTimestampHeaders.make("02", 30L, new RecordHeaders()), getter1.get("A"));
+            assertEquals(ValueTimestampHeaders.make("02", 5L, new RecordHeaders()), getter1.get("B"));
+            assertEquals(ValueTimestampHeaders.make("01", 15L, new RecordHeaders()), getter1.get("C"));
+
+            inputTopic1.pipeInput("A", "03", 29L);
+
+            assertEquals(ValueTimestampHeaders.make("03", 29L, new RecordHeaders()), getter1.get("A"));
+            assertEquals(ValueTimestampHeaders.make("02", 5L, new RecordHeaders()), getter1.get("B"));
+            assertEquals(ValueTimestampHeaders.make("01", 15L, new RecordHeaders()), getter1.get("C"));
+
+            inputTopic1.pipeInput("A", null, 50L);
+            inputTopic1.pipeInput("B", null, 3L);
+
+            assertNull(getter1.get("A"));
+            assertNull(getter1.get("B"));
+            assertEquals(ValueTimestampHeaders.make("01", 15L, new RecordHeaders()), getter1.get("C"));
+        }
+    }
+
+    @Test
+    public void testNotSendingOldValue() {
+        final StreamsBuilder builder = new StreamsBuilder();
+        final String topic1 = "topic1";
+
+        @SuppressWarnings("unchecked")
+        final KTableImpl<String, String, String> table1 =
+            (KTableImpl<String, String, String>) builder.table(topic1, stringConsumed);
+
+        final MockApiProcessorSupplier<String, Integer, Void, Void> supplier = new MockApiProcessorSupplier<>();
+        final Topology topology = builder.build().addProcessor("proc1", supplier, table1.name);
+
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(topology).withConfig(props).build()) {
+            final TestInputTopic<String, String> inputTopic1 =
+                driver.createInputTopic(
+                    topic1,
+                    new StringSerializer(),
+                    new StringSerializer(),
+                    Instant.ofEpochMilli(0L),
+                    Duration.ZERO
+                );
+            final MockApiProcessor<String, Integer, Void, Void> proc1 = supplier.theCapturedProcessor();
+
+            inputTopic1.pipeInput("A", "01", 10L);
+            inputTopic1.pipeInput("B", "01", 20L);
+            inputTopic1.pipeInput("C", "01", 15L);
+            proc1.checkAndClearProcessResult(
+                new KeyValueTimestamp<>("A", new Change<>("01", null), 10),
+                new KeyValueTimestamp<>("B", new Change<>("01", null), 20),
+                new KeyValueTimestamp<>("C", new Change<>("01", null), 15)
+            );
+
+            inputTopic1.pipeInput("A", "02", 8L);
+            inputTopic1.pipeInput("B", "02", 22L);
+            proc1.checkAndClearProcessResult(
+                new KeyValueTimestamp<>("A", new Change<>("02", null), 8),
+                new KeyValueTimestamp<>("B", new Change<>("02", null), 22)
+            );
+
+            inputTopic1.pipeInput("A", "03", 12L);
+            proc1.checkAndClearProcessResult(
+                new KeyValueTimestamp<>("A", new Change<>("03", null), 12)
+            );
+
+            inputTopic1.pipeInput("A", null, 15L);
+            inputTopic1.pipeInput("B", null, 20L);
+            proc1.checkAndClearProcessResult(
+                new KeyValueTimestamp<>("A", new Change<>(null, null), 15),
+                new KeyValueTimestamp<>("B", new Change<>(null, null), 20)
+            );
+        }
+    }
+
+    @Test
+    public void testSendingOldValue() {
+        final StreamsBuilder builder = new StreamsBuilder();
+        final String topic1 = "topic1";
+
+        @SuppressWarnings("unchecked")
+        final KTableImpl<String, String, String> table1 =
+            (KTableImpl<String, String, String>) builder.table(topic1, stringConsumed);
+        table1.enableSendingOldValues(true);
         assertTrue(table1.sendingOldValueEnabled());
 
-        MockProcessorSupplier<String, Integer> proc1 = new MockProcessorSupplier<>();
+        final MockApiProcessorSupplier<String, Integer, Void, Void> supplier = new MockApiProcessorSupplier<>();
+        final Topology topology = builder.build().addProcessor("proc1", supplier, table1.name);
 
-        builder.addProcessor("proc1", proc1, table1.name);
+        try (final TopologyTestDriver driver = new TopologyTestDriverBuilder(topology).withConfig(props).build()) {
+            final TestInputTopic<String, String> inputTopic1 =
+                driver.createInputTopic(
+                    topic1,
+                    new StringSerializer(),
+                    new StringSerializer(),
+                    Instant.ofEpochMilli(0L),
+                    Duration.ZERO
+                );
+            final MockApiProcessor<String, Integer, Void, Void> proc1 = supplier.theCapturedProcessor();
 
-        driver = new KStreamTestDriver(builder, stateDir, null, null);
+            inputTopic1.pipeInput("A", "01", 10L);
+            inputTopic1.pipeInput("B", "01", 20L);
+            inputTopic1.pipeInput("C", "01", 15L);
+            proc1.checkAndClearProcessResult(
+                new KeyValueTimestamp<>("A", new Change<>("01", null), 10),
+                new KeyValueTimestamp<>("B", new Change<>("01", null), 20),
+                new KeyValueTimestamp<>("C", new Change<>("01", null), 15)
+            );
 
-        driver.process(topic1, "A", "01");
-        driver.process(topic1, "B", "01");
-        driver.process(topic1, "C", "01");
-        driver.flushState();
+            inputTopic1.pipeInput("A", "02", 8L);
+            inputTopic1.pipeInput("B", "02", 22L);
+            proc1.checkAndClearProcessResult(
+                new KeyValueTimestamp<>("A", new Change<>("02", "01"), 8),
+                new KeyValueTimestamp<>("B", new Change<>("02", "01"), 22)
+            );
 
-        proc1.checkAndClearProcessResult("A:(01<-null)", "B:(01<-null)", "C:(01<-null)");
+            inputTopic1.pipeInput("A", "03", 12L);
+            proc1.checkAndClearProcessResult(
+                new KeyValueTimestamp<>("A", new Change<>("03", "02"), 12)
+            );
 
-        driver.process(topic1, "A", "02");
-        driver.process(topic1, "B", "02");
-        driver.flushState();
-
-        proc1.checkAndClearProcessResult("A:(02<-01)", "B:(02<-01)");
-
-        driver.process(topic1, "A", "03");
-        driver.flushState();
-
-        proc1.checkAndClearProcessResult("A:(03<-02)");
-
-        driver.process(topic1, "A", null);
-        driver.process(topic1, "B", null);
-        driver.flushState();
-
-        proc1.checkAndClearProcessResult("A:(null<-03)", "B:(null<-02)");
+            inputTopic1.pipeInput("A", null, 15L);
+            inputTopic1.pipeInput("B", null, 20L);
+            proc1.checkAndClearProcessResult(
+                new KeyValueTimestamp<>("A", new Change<>(null, "03"), 15),
+                new KeyValueTimestamp<>("B", new Change<>(null, "02"), 20)
+            );
+        }
     }
 }

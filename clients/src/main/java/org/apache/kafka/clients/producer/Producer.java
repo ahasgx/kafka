@@ -16,30 +16,42 @@
  */
 package org.apache.kafka.clients.producer;
 
+import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.PartitionInfo;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.common.errors.ProducerFencedException;
+import org.apache.kafka.common.metrics.KafkaMetric;
 
 import java.io.Closeable;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 
 /**
  * The interface for the {@link KafkaProducer}
  * @see KafkaProducer
  * @see MockProducer
  */
+@InterfaceAudience.Public
 public interface Producer<K, V> extends Closeable {
 
     /**
      * See {@link KafkaProducer#initTransactions()}
      */
-    void initTransactions();
+    default void initTransactions() {
+        initTransactions(false);
+    }
+
+    /**
+     * See {@link KafkaProducer#initTransactions(boolean)}
+     */
+    void initTransactions(boolean keepPreparedTxn);
 
     /**
      * See {@link KafkaProducer#beginTransaction()}
@@ -47,10 +59,15 @@ public interface Producer<K, V> extends Closeable {
     void beginTransaction() throws ProducerFencedException;
 
     /**
-     * See {@link KafkaProducer#sendOffsetsToTransaction(Map, String)}
+     * See {@link KafkaProducer#sendOffsetsToTransaction(Map, ConsumerGroupMetadata)}
      */
     void sendOffsetsToTransaction(Map<TopicPartition, OffsetAndMetadata> offsets,
-                                  String consumerGroupId) throws ProducerFencedException;
+                                  ConsumerGroupMetadata groupMetadata) throws ProducerFencedException;
+
+    /**
+     * See {@link KafkaProducer#prepareTransaction()}
+     */
+    PreparedTxnState prepareTransaction() throws ProducerFencedException;
 
     /**
      * See {@link KafkaProducer#commitTransaction()}
@@ -63,43 +80,57 @@ public interface Producer<K, V> extends Closeable {
     void abortTransaction() throws ProducerFencedException;
 
     /**
-     * Send the given record asynchronously and return a future which will eventually contain the response information.
-     *
-     * @param record The record to send
-     * @return A future which will eventually contain the response information
+     * See {@link KafkaProducer#completeTransaction(PreparedTxnState)}
      */
-    public Future<RecordMetadata> send(ProducerRecord<K, V> record);
+    void completeTransaction(PreparedTxnState preparedTxnState) throws ProducerFencedException;
 
     /**
-     * Send a record and invoke the given callback when the record has been acknowledged by the server
+     * See {@link KafkaProducer#registerMetricForSubscription(KafkaMetric)}
      */
-    public Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback);
+    void registerMetricForSubscription(KafkaMetric metric);
 
     /**
-     * Flush any accumulated records from the producer. Blocks until all sends are complete.
+     * See {@link KafkaProducer#unregisterMetricFromSubscription(KafkaMetric)}
      */
-    public void flush();
+    void unregisterMetricFromSubscription(KafkaMetric metric);
 
     /**
-     * Get a list of partitions for the given topic for custom partition assignment. The partition metadata will change
-     * over time so this list should not be cached.
+     * See {@link KafkaProducer#send(ProducerRecord)}
      */
-    public List<PartitionInfo> partitionsFor(String topic);
+    Future<RecordMetadata> send(ProducerRecord<K, V> record);
 
     /**
-     * Return a map of metrics maintained by the producer
+     * See {@link KafkaProducer#send(ProducerRecord, Callback)}
      */
-    public Map<MetricName, ? extends Metric> metrics();
+    Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback);
 
     /**
-     * Close this producer
+     * See {@link KafkaProducer#flush()}
      */
-    public void close();
+    void flush();
 
     /**
-     * Tries to close the producer cleanly within the specified timeout. If the close does not complete within the
-     * timeout, fail any pending send requests and force close the producer.
+     * See {@link KafkaProducer#partitionsFor(String)}
      */
-    public void close(long timeout, TimeUnit unit);
+    List<PartitionInfo> partitionsFor(String topic);
 
+    /**
+     * See {@link KafkaProducer#metrics()}
+     */
+    Map<MetricName, ? extends Metric> metrics();
+
+    /**
+     * See {@link KafkaProducer#clientInstanceId(Duration)}
+     */
+    Uuid clientInstanceId(Duration timeout);
+
+    /**
+     * See {@link KafkaProducer#close()}
+     */
+    void close();
+
+    /**
+     * See {@link KafkaProducer#close(Duration)}
+     */
+    void close(Duration timeout);
 }

@@ -17,7 +17,9 @@
 package org.apache.kafka.streams.processor.internals;
 
 import org.apache.kafka.clients.producer.Producer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.streams.processor.StreamPartitioner;
 
@@ -28,18 +30,37 @@ public interface RecordCollector {
     <K, V> void send(final String topic,
                      final K key,
                      final V value,
+                     final Headers headers,
                      final Integer partition,
                      final Long timestamp,
                      final Serializer<K> keySerializer,
-                     final Serializer<V> valueSerializer);
+                     final Serializer<V> valueSerializer,
+                     final String processorNodeId,
+                     final InternalProcessorContext<Void, Void> context);
 
     <K, V> void send(final String topic,
                      final K key,
                      final V value,
+                     final Headers headers,
                      final Long timestamp,
                      final Serializer<K> keySerializer,
                      final Serializer<V> valueSerializer,
+                     final String processorNodeId,
+                     final InternalProcessorContext<Void, Void> context,
                      final StreamPartitioner<? super K, ? super V> partitioner);
+
+    <K, V> void send(K key,
+                     V value,
+                     String processorNodeId,
+                     InternalProcessorContext<?, ?> context,
+                     ProducerRecord<byte[], byte[]> serializedRecord);
+
+    /**
+     * Initialize the internal {@link Producer}; note this function should be made idempotent
+     *
+     * @throws org.apache.kafka.common.errors.TimeoutException if producer initializing txn id timed out
+     */
+    void initialize();
 
     /**
      * Flush the internal {@link Producer}.
@@ -47,20 +68,27 @@ public interface RecordCollector {
     void flush();
 
     /**
-     * Close the internal {@link Producer}.
+     * Clean close the internal {@link Producer}.
      */
-    void close();
+    void closeClean();
+
+    /**
+     * Dirty close the internal {@link Producer}.
+     */
+    void closeDirty();
 
     /**
      * The last acked offsets from the internal {@link Producer}.
      *
-     * @return the map from TopicPartition to offset
+     * @return an immutable map from TopicPartition to offset
      */
     Map<TopicPartition, Long> offsets();
 
     /**
      * A supplier of a {@link RecordCollectorImpl} instance.
      */
+    // TODO: after we have done KAFKA-9088 we should just add this function
+    // to InternalProcessorContext interface
     interface Supplier {
         /**
          * Get the record collector.

@@ -14,18 +14,22 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common.errors;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
 
 /**
  * This exception indicates a record has failed its internal CRC check, this generally indicates network or disk
  * corruption.
  */
+@InterfaceAudience.Public
 public class CorruptRecordException extends RetriableException {
 
     private static final long serialVersionUID = 1L;
 
     public CorruptRecordException() {
-        super("This message has failed its CRC checksum, exceeds the valid size, or is otherwise corrupt.");
+        super("This message has failed its CRC checksum, exceeds the valid size, has a null key for a compacted topic, or is otherwise corrupt.");
     }
 
     public CorruptRecordException(String message) {

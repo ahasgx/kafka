@@ -16,14 +16,16 @@
  */
 package org.apache.kafka.connect.data;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.connect.errors.DataException;
 
 /**
  * <p>
  *     A timestamp representing an absolute time, without timezone information. The corresponding Java type is a
- *     java.util.Date. The underlying representation is a long representing the number of milliseconds since Unix epoch.
+ *     {@link java.util.Date}. The underlying representation is a long representing the number of milliseconds since Unix epoch.
  * </p>
  */
+@InterfaceAudience.Public
 public class Timestamp {
     public static final String LOGICAL_NAME = "org.apache.kafka.connect.data.Timestamp";
 
@@ -41,18 +43,23 @@ public class Timestamp {
     public static final Schema SCHEMA = builder().schema();
 
     /**
-     * Convert a value from its logical format (Date) to it's encoded format.
+     * Convert a value from its logical format ({@link java.util.Date}) to its encoded format (long).
      * @param value the logical value
      * @return the encoded value
      */
     public static long fromLogical(Schema schema, java.util.Date value) {
-        if (schema.name() == null || !(schema.name().equals(LOGICAL_NAME)))
+        if (!(LOGICAL_NAME.equals(schema.name())))
             throw new DataException("Requested conversion of Timestamp object but the schema does not match.");
         return value.getTime();
     }
 
+    /**
+     * Convert a value from its encoded format (long) to its logical format ({@link java.util.Date}).
+     * @param value the encoded value
+     * @return the logical value
+     */
     public static java.util.Date toLogical(Schema schema, long value) {
-        if (schema.name() == null || !(schema.name().equals(LOGICAL_NAME)))
+        if (!(LOGICAL_NAME.equals(schema.name())))
             throw new DataException("Requested conversion of Timestamp object but the schema does not match.");
         return new java.util.Date(value);
     }

@@ -17,29 +17,30 @@
   */
 package kafka.server
 
-import java.util.Properties
+import org.apache.kafka.security.JaasTestUtils.JaasSection
+import org.apache.kafka.security.JaasTestUtils
 
-import kafka.utils.JaasTestUtils
-import kafka.utils.JaasTestUtils.JaasSection
-import org.apache.kafka.common.network.ListenerName
+import java.util.Properties
+import scala.collection.Seq
+import scala.jdk.OptionConverters._
+import scala.jdk.CollectionConverters._
+
 
 class MultipleListenersWithAdditionalJaasContextTest extends MultipleListenersWithSameSecurityProtocolBaseTest {
 
   import MultipleListenersWithSameSecurityProtocolBaseTest._
 
-  override def saslProperties(listenerName: ListenerName): Properties = {
-    listenerName.value match {
-      case SecureInternal => kafkaClientSaslProperties(Plain, dynamicJaasConfig = true)
-      case SecureExternal => kafkaClientSaslProperties(GssApi, dynamicJaasConfig = true)
-      case _ => throw new IllegalArgumentException(s"Unexpected listener name $listenerName")
-    }
+  override def staticJaasSections: Seq[JaasSection] = {
+    val (serverKeytabFile, _) = maybeCreateEmptyKeytabFiles()
+    Seq(JaasTestUtils.kafkaServerSection("secure_external.KafkaServer", kafkaServerSaslMechanisms(SecureExternal).asJava, Some(serverKeytabFile).toJava))
   }
 
-  override def jaasSections: Seq[JaasSection] = {
-    val (serverKeytabFile, _) = maybeCreateEmptyKeytabFiles()
-    JaasTestUtils.zkSections ++ Seq(
-      JaasTestUtils.kafkaServerSection("secure_external.KafkaServer", Seq(GssApi), Some(serverKeytabFile)),
-      JaasTestUtils.kafkaServerSection("secure_internal.KafkaServer", Seq(Plain), None)
-    )
+  override protected def dynamicJaasSections: Properties = {
+    val props = new Properties
+    kafkaServerSaslMechanisms(SecureInternal).foreach { mechanism =>
+      addDynamicJaasSection(props, SecureInternal, mechanism,
+        JaasTestUtils.kafkaServerSection("secure_internal.KafkaServer", java.util.List.of(mechanism), None.toJava))
+    }
+    props
   }
 }

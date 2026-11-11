@@ -1,0 +1,254 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.coordinator.group.modern;
+
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorMetadataImage;
+import org.apache.kafka.coordinator.group.api.assignor.GroupSpec;
+import org.apache.kafka.coordinator.group.api.assignor.MemberAssignment;
+import org.apache.kafka.coordinator.group.api.assignor.MemberSubscription;
+import org.apache.kafka.coordinator.group.api.assignor.SubscriptionType;
+import org.apache.kafka.coordinator.group.modern.share.ShareGroup.InitMapValue;
+
+import java.util.BitSet;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+/**
+ * The assignment specification for a modern group.
+ */
+public abstract class GroupSpecImpl implements GroupSpec {
+
+    /**
+     * The assignment specification for a consumer group.
+     */
+    public static class ConsumerGroupSpec extends GroupSpecImpl {
+        public ConsumerGroupSpec(
+            CoordinatorMetadataImage metadataImage,
+            Map<String, MemberSubscriptionAndAssignmentImpl> members,
+            SubscriptionType subscriptionType
+        ) {
+            super(metadataImage, members, subscriptionType);
+        }
+
+        @Override
+        public String toString() {
+            return "ConsumerGroupSpec(" +
+                "members=" + members +
+                ", subscriptionType=" + subscriptionType +
+                ')';
+        }
+    }
+
+    /**
+     * The assignment specification for a share group.
+     */
+    public static class ShareGroupSpec extends GroupSpecImpl {
+        /**
+         * The initialized topic partitions, which are the only assignable partitions.
+         */
+        private final Map<Uuid, InitMapValue> initializedTopics;
+
+        public ShareGroupSpec(
+            CoordinatorMetadataImage metadataImage,
+            Map<String, MemberSubscriptionAndAssignmentImpl> members,
+            SubscriptionType subscriptionType,
+            Map<Uuid, InitMapValue> initializedTopics
+        ) {
+            super(metadataImage, members, subscriptionType);
+            this.initializedTopics = Objects.requireNonNull(initializedTopics);
+        }
+
+        /**
+         * {@inheritDoc}
+         */
+        @Override
+        public boolean isPartitionAssignable(Uuid topicId, int partitionId) {
+            InitMapValue initMapValue = initializedTopics.get(topicId);
+            if (initMapValue == null) {
+                return false;
+            }
+            return initMapValue.partitions().contains(partitionId);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (!super.equals(o)) return false;
+            ShareGroupSpec groupSpec = (ShareGroupSpec) o;
+            return Objects.equals(initializedTopics, groupSpec.initializedTopics);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(super.hashCode(), initializedTopics);
+        }
+
+        @Override
+        public String toString() {
+            return "ShareGroupSpec(" +
+                "members=" + members +
+                ", subscriptionType=" + subscriptionType +
+                ", initializedTopics=" + initializedTopics +
+                ')';
+        }
+    }
+
+    /**
+     * The partitions of a topic which are currently assigned to a member.
+     *
+     * @param partitions     The assigned partitions.
+     * @param partitionCount The number of partitions in the topic.
+     */
+    private record AssignedPartitions(BitSet partitions, int partitionCount) { }
+
+    /**
+     * The metadata image, used to look up the partition count of each topic.
+     */
+    private final CoordinatorMetadataImage metadataImage;
+
+    /**
+     * Member subscription metadata keyed by member Id.
+     */
+    protected final Map<String, MemberSubscriptionAndAssignmentImpl> members;
+
+    /**
+     * The subscription type of the group.
+     */
+    protected final SubscriptionType subscriptionType;
+
+    /**
+     * The partitions which are currently assigned to a member,
+     * keyed by topic id.
+     */
+    private Map<Uuid, AssignedPartitions> assignedTopicPartitions;
+
+    protected GroupSpecImpl(
+        CoordinatorMetadataImage metadataImage,
+        Map<String, MemberSubscriptionAndAssignmentImpl> members,
+        SubscriptionType subscriptionType
+    ) {
+        this.metadataImage = Objects.requireNonNull(metadataImage);
+        this.members = Objects.requireNonNull(members);
+        this.subscriptionType = Objects.requireNonNull(subscriptionType);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Collection<String> memberIds() {
+        return members.keySet();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public SubscriptionType subscriptionType() {
+        return subscriptionType;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Partitions which do not exist in the metadata image are reported as unassigned.
+     */
+    @Override
+    public boolean isPartitionAssigned(Uuid topicId, int partitionId) {
+        if (assignedTopicPartitions == null) {
+            assignedTopicPartitions = computeAssignedTopicPartitions();
+        }
+        AssignedPartitions assignedPartitions = assignedTopicPartitions.get(topicId);
+        return assignedPartitions != null && partitionId >= 0 && assignedPartitions.partitions().get(partitionId);
+    }
+
+    private Map<Uuid, AssignedPartitions> computeAssignedTopicPartitions() {
+        Map<Uuid, AssignedPartitions> assignedTopicPartitions = new HashMap<>();
+        for (MemberSubscriptionAndAssignmentImpl member : members.values()) {
+            for (Map.Entry<Uuid, Set<Integer>> entry : member.partitions().entrySet()) {
+                AssignedPartitions assignedPartitions = assignedTopicPartitions.computeIfAbsent(
+                    entry.getKey(),
+                    topicId -> {
+                        int partitionCount = metadataImage.topicMetadata(topicId)
+                            .map(CoordinatorMetadataImage.TopicMetadata::partitionCount)
+                            .orElse(0);
+                        return new AssignedPartitions(new BitSet(partitionCount), partitionCount);
+                    }
+                );
+                for (int partition : entry.getValue()) {
+                    if (partition < 0 || partition >= assignedPartitions.partitionCount()) {
+                        // Drop partitions that do not exist.
+                        continue;
+                    }
+
+                    assignedPartitions.partitions().set(partition);
+                }
+            }
+        }
+
+        return assignedTopicPartitions;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public boolean isPartitionAssignable(Uuid topicId, int partitionId) {
+        return true;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public MemberSubscription memberSubscription(String memberId) {
+        MemberSubscription memberSubscription = members.get(memberId);
+        if (memberSubscription == null) {
+            throw new IllegalArgumentException("Member Id " + memberId + " not found.");
+        }
+        return memberSubscription;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public MemberAssignment memberAssignment(String memberId) {
+        MemberSubscriptionAndAssignmentImpl member = members.get(memberId);
+        if (member == null) {
+            return new MemberAssignmentImpl(Map.of());
+        }
+        return member;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        GroupSpecImpl groupSpec = (GroupSpecImpl) o;
+        return Objects.equals(members, groupSpec.members) &&
+            subscriptionType == groupSpec.subscriptionType;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(members, subscriptionType);
+    }
+}

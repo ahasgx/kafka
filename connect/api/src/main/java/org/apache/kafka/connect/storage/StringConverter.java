@@ -16,9 +16,13 @@
  */
 package org.apache.kafka.connect.storage;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
+import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.utils.internals.AppInfoParser;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaAndValue;
 import org.apache.kafka.connect.errors.DataException;
@@ -27,16 +31,20 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * {@link Converter} implementation that only supports serializing to strings. When converting Kafka Connect data to bytes,
- * the schema will be ignored and {@link Object#toString()} will always be invoked to convert the data to a String.
+ * {@link Converter} and {@link HeaderConverter} implementation that only supports serializing to strings. When converting Kafka Connect
+ * data to bytes, the schema will be ignored and {@link Object#toString()} will always be invoked to convert the data to a String.
  * When converting from bytes to Kafka Connect format, the converter will only ever return an optional string schema and
  * a string or null.
- *
+ * <p>
  * Encoding configuration is identical to {@link StringSerializer} and {@link StringDeserializer}, but for convenience
- * this class can also be configured to use the same encoding for both encoding and decoding with the converter.encoding
- * setting.
+ * this class can also be configured to use the same encoding for both encoding and decoding with the
+ * {@link StringConverterConfig#ENCODING_CONFIG converter.encoding} setting.
+ * <p>
+ * This implementation currently does nothing with the topic names or header keys.
  */
-public class StringConverter implements Converter {
+@InterfaceAudience.Public
+public class StringConverter implements Converter, HeaderConverter {
+
     private final StringSerializer serializer = new StringSerializer();
     private final StringDeserializer deserializer = new StringDeserializer();
 
@@ -44,20 +52,35 @@ public class StringConverter implements Converter {
     }
 
     @Override
-    public void configure(Map<String, ?> configs, boolean isKey) {
-        Map<String, Object> serializerConfigs = new HashMap<>();
-        serializerConfigs.putAll(configs);
-        Map<String, Object> deserializerConfigs = new HashMap<>();
-        deserializerConfigs.putAll(configs);
+    public String version() {
+        return AppInfoParser.getVersion();
+    }
 
-        Object encodingValue = configs.get("converter.encoding");
-        if (encodingValue != null) {
-            serializerConfigs.put("serializer.encoding", encodingValue);
-            deserializerConfigs.put("deserializer.encoding", encodingValue);
-        }
+    @Override
+    public ConfigDef config() {
+        return StringConverterConfig.configDef();
+    }
 
+    @Override
+    public void configure(Map<String, ?> configs) {
+        StringConverterConfig conf = new StringConverterConfig(configs);
+        String encoding = conf.encoding();
+
+        Map<String, Object> serializerConfigs = new HashMap<>(configs);
+        Map<String, Object> deserializerConfigs = new HashMap<>(configs);
+        serializerConfigs.put("serializer.encoding", encoding);
+        deserializerConfigs.put("deserializer.encoding", encoding);
+
+        boolean isKey = conf.type() == ConverterType.KEY;
         serializer.configure(serializerConfigs, isKey);
         deserializer.configure(deserializerConfigs, isKey);
+    }
+
+    @Override
+    public void configure(Map<String, ?> configs, boolean isKey) {
+        Map<String, Object> conf = new HashMap<>(configs);
+        conf.put(StringConverterConfig.TYPE_CONFIG, isKey ? ConverterType.KEY.getName() : ConverterType.VALUE.getName());
+        configure(conf);
     }
 
     @Override
@@ -76,5 +99,21 @@ public class StringConverter implements Converter {
         } catch (SerializationException e) {
             throw new DataException("Failed to deserialize string: ", e);
         }
+    }
+
+    @Override
+    public byte[] fromConnectHeader(String topic, String headerKey, Schema schema, Object value) {
+        return fromConnectData(topic, schema, value);
+    }
+
+    @Override
+    public SchemaAndValue toConnectHeader(String topic, String headerKey, byte[] value) {
+        return toConnectData(topic, value);
+    }
+
+    @Override
+    public void close() {
+        Utils.closeQuietly(this.serializer, "string converter serializer");
+        Utils.closeQuietly(this.deserializer, "string converter deserializer");
     }
 }

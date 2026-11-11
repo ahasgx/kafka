@@ -14,21 +14,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
 /**
- * A numerical metric tracked for monitoring purposes
+ * A metric tracked for monitoring purposes.
  */
+@InterfaceAudience.Public
 public interface Metric {
 
     /**
      * A name for this metric
      */
-    public MetricName metricName();
+    MetricName metricName();
 
     /**
-     * The value of the metric
+     * The value of the metric, which may be measurable or a non-measurable gauge
      */
-    public double value();
+    Object metricValue();
 
 }

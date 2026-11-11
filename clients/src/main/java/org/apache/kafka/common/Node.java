@@ -14,11 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.common;
+
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
+import java.util.Objects;
 
 /**
  * Information about a Kafka node
  */
+@InterfaceAudience.Public
 public class Node {
 
     private static final Node NO_NODE = new Node(-1, "", -1);
@@ -28,18 +34,30 @@ public class Node {
     private final String host;
     private final int port;
     private final String rack;
+    private final boolean isFenced;
+
+    // Cache hashCode as it is called in performance sensitive parts of the code (e.g. RecordAccumulator.ready)
+    private Integer hash;
 
     public Node(int id, String host, int port) {
-        this(id, host, port, null);
+        this(id, host, port, null, false);
     }
 
     public Node(int id, String host, int port, String rack) {
-        super();
+        this(id, host, port, rack, false);
+    }
+
+    public Node(int id, String host, int port, String rack, boolean isFenced) {
+        this(id, host, port, rack, isFenced, Integer.toString(id));
+    }
+
+    protected Node(int id, String host, int port, String rack, boolean isFenced, String idString) {
         this.id = id;
-        this.idString = Integer.toString(id);
+        this.idString = idString;
         this.host = host;
         this.port = port;
         this.rack = rack;
+        this.isFenced = isFenced;
     }
 
     public static Node noNode() {
@@ -64,7 +82,8 @@ public class Node {
 
     /**
      * String representation of the node id.
-     * Typically the integer id is used to serialize over the wire, the string representation is used as an identifier with NetworkClient code
+     * Typically, the integer id is used to serialize over the wire, the string representation is used as an
+     * identifier with NetworkClient code
      */
     public String idString() {
         return idString;
@@ -98,46 +117,48 @@ public class Node {
         return rack;
     }
 
+    /**
+     * Returns whether this node is fenced.
+     * <p>
+     * This applies to broker nodes only. For controller quorum nodes, this field
+     * is not relevant and is defined to be {@code false}.
+     */
+    public boolean isFenced() {
+        return isFenced;
+    }
+
     @Override
     public int hashCode() {
-        final int prime = 31;
-        int result = 1;
-        result = prime * result + ((host == null) ? 0 : host.hashCode());
-        result = prime * result + id;
-        result = prime * result + port;
-        result = prime * result + ((rack == null) ? 0 : rack.hashCode());
-        return result;
+        Integer h = this.hash;
+        if (h == null) {
+            int result = 31 + ((host == null) ? 0 : host.hashCode());
+            result = 31 * result + id;
+            result = 31 * result + port;
+            result = 31 * result + ((rack == null) ? 0 : rack.hashCode());
+            result = 31 * result + Objects.hashCode(isFenced);
+            this.hash = result;
+            return result;
+        } else {
+            return h;
+        }
     }
 
     @Override
     public boolean equals(Object obj) {
         if (this == obj)
             return true;
-        if (obj == null)
-            return false;
-        if (getClass() != obj.getClass())
+        if (obj == null || getClass() != obj.getClass())
             return false;
         Node other = (Node) obj;
-        if (host == null) {
-            if (other.host != null)
-                return false;
-        } else if (!host.equals(other.host))
-            return false;
-        if (id != other.id)
-            return false;
-        if (port != other.port)
-            return false;
-        if (rack == null) {
-            if (other.rack != null)
-                return false;
-        } else if (!rack.equals(other.rack))
-            return false;
-        return true;
+        return id == other.id &&
+            port == other.port &&
+            Objects.equals(host, other.host) &&
+            Objects.equals(rack, other.rack) &&
+            Objects.equals(isFenced, other.isFenced);
     }
 
     @Override
     public String toString() {
-        return host + ":" + port + " (id: " + idString + " rack: " + rack + ")";
+        return host + ":" + port + " (id: " + idString + " rack: " + rack + " isFenced: " + isFenced + ")";
     }
-
 }

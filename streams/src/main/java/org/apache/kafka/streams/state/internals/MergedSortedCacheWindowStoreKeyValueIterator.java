@@ -17,59 +17,88 @@
 
 package org.apache.kafka.streams.state.internals;
 
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeaders;
+import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.StateSerdes;
 
-class MergedSortedCacheWindowStoreKeyValueIterator<K, V>
-    extends AbstractMergedSortedCacheStoreIterator<Windowed<K>, Windowed<Bytes>, V, byte[]> {
+class MergedSortedCacheWindowStoreKeyValueIterator
+    extends AbstractMergedSortedCacheStoreIterator<Windowed<Bytes>, Windowed<Bytes>, byte[], byte[]> {
 
-    private final StateSerdes<K, V> serdes;
+    private final StateSerdes<Bytes, byte[]> serdes;
     private final long windowSize;
     private final SegmentedCacheFunction cacheFunction;
+    private final StoreKeyToWindowKey storeKeyToWindowKey;
+    private final WindowKeyToBytes windowKeyToBytes;
 
     MergedSortedCacheWindowStoreKeyValueIterator(
         final PeekingKeyValueIterator<Bytes, LRUCacheEntry> filteredCacheIterator,
         final KeyValueIterator<Windowed<Bytes>, byte[]> underlyingIterator,
-        final StateSerdes<K, V> serdes,
+        final StateSerdes<Bytes, byte[]> serdes,
         final long windowSize,
-        final SegmentedCacheFunction cacheFunction
+        final SegmentedCacheFunction cacheFunction,
+        final boolean forward
     ) {
-        super(filteredCacheIterator, underlyingIterator);
+        this(filteredCacheIterator, underlyingIterator, serdes,
+            windowSize, cacheFunction, forward, WindowKeySchema::fromStoreKey, WindowKeySchema::toStoreKeyBinary);
+    }
+
+    MergedSortedCacheWindowStoreKeyValueIterator(
+        final PeekingKeyValueIterator<Bytes, LRUCacheEntry> filteredCacheIterator,
+        final KeyValueIterator<Windowed<Bytes>, byte[]> underlyingIterator,
+        final StateSerdes<Bytes, byte[]> serdes,
+        final long windowSize,
+        final SegmentedCacheFunction cacheFunction,
+        final boolean forward,
+        final StoreKeyToWindowKey storeKeyToWindowKey,
+        final WindowKeyToBytes windowKeyToBytes
+    ) {
+        super(filteredCacheIterator, underlyingIterator, forward);
         this.serdes = serdes;
         this.windowSize = windowSize;
         this.cacheFunction = cacheFunction;
+        this.storeKeyToWindowKey = storeKeyToWindowKey;
+        this.windowKeyToBytes = windowKeyToBytes;
     }
 
     @Override
-    Windowed<K> deserializeStoreKey(final Windowed<Bytes> key) {
-        return new Windowed<>(serdes.keyFrom(key.key().get()), key.window());
+    Windowed<Bytes> deserializeStoreKey(final Windowed<Bytes> key) {
+        return key;
     }
 
     @Override
-    KeyValue<Windowed<K>, V> deserializeStorePair(final KeyValue<Windowed<Bytes>, byte[]> pair) {
-        return KeyValue.pair(deserializeStoreKey(pair.key), serdes.valueFrom(pair.value));
+    KeyValue<Windowed<Bytes>, byte[]> deserializeStorePair(final KeyValue<Windowed<Bytes>, byte[]> pair) {
+        return pair;
     }
 
     @Override
-    Windowed<K> deserializeCacheKey(final Bytes cacheKey) {
-        byte[] binaryKey = cacheFunction.key(cacheKey).get();
-
-        final long timestamp = WindowStoreUtils.timestampFromBinaryKey(binaryKey);
-        final K key = WindowStoreUtils.keyFromBinaryKey(binaryKey, serdes);
-        return new Windowed<>(key, WindowStoreUtils.timeWindowForSize(timestamp, windowSize));
+    Windowed<Bytes> deserializeCacheKey(final Bytes cacheKey) {
+        final byte[] binaryKey = cacheFunction.key(cacheKey).get();
+        return storeKeyToWindowKey.toWindowKey(binaryKey, windowSize, serdes.keyDeserializer(), new RecordHeaders(), serdes.topic());
     }
 
     @Override
-    V deserializeCacheValue(final LRUCacheEntry cacheEntry) {
-        return serdes.valueFrom(cacheEntry.value);
+    byte[] deserializeCacheValue(final LRUCacheEntry cacheEntry) {
+        return cacheEntry.value();
     }
 
     @Override
     int compare(final Bytes cacheKey, final Windowed<Bytes> storeKey) {
-        Bytes storeKeyBytes = WindowStoreUtils.toBinaryKey(storeKey.key().get(), storeKey.window().start(), 0);
+        final Bytes storeKeyBytes = windowKeyToBytes.toBytes(storeKey.key(), storeKey.window().start(), 0);
         return cacheFunction.compareSegmentedKeys(cacheKey, storeKeyBytes);
+    }
+
+    @FunctionalInterface
+    interface StoreKeyToWindowKey {
+        Windowed<Bytes> toWindowKey(final byte[] binaryKey, final long windowSize, final Deserializer<Bytes> deserializer, final Headers headers, final String topic);
+    }
+
+    @FunctionalInterface
+    interface WindowKeyToBytes {
+        Bytes toBytes(final Bytes key, final long windowStart, final int seqNum);
     }
 }

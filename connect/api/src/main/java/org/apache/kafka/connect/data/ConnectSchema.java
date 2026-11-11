@@ -16,62 +16,61 @@
  */
 package org.apache.kafka.connect.data;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
 import org.apache.kafka.connect.errors.DataException;
 
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
+@InterfaceAudience.Public
 public class ConnectSchema implements Schema {
     /**
-     * Maps Schema.Types to a list of Java classes that can be used to represent them.
+     * Maps {@link Schema.Type}s to a list of Java classes that can be used to represent them.
      */
-    private static final Map<Type, List<Class>> SCHEMA_TYPE_CLASSES = new HashMap<>();
-    /**
-     * Maps known logical types to a list of Java classes that can be used to represent them.
-     */
-    private static final Map<String, List<Class>> LOGICAL_TYPE_CLASSES = new HashMap<>();
-
-    /**
-     * Maps the Java classes to the corresponding Schema.Type.
-     */
-    private static final Map<Class<?>, Type> JAVA_CLASS_SCHEMA_TYPES = new HashMap<>();
-
-    static {
-        SCHEMA_TYPE_CLASSES.put(Type.INT8, Arrays.asList((Class) Byte.class));
-        SCHEMA_TYPE_CLASSES.put(Type.INT16, Arrays.asList((Class) Short.class));
-        SCHEMA_TYPE_CLASSES.put(Type.INT32, Arrays.asList((Class) Integer.class));
-        SCHEMA_TYPE_CLASSES.put(Type.INT64, Arrays.asList((Class) Long.class));
-        SCHEMA_TYPE_CLASSES.put(Type.FLOAT32, Arrays.asList((Class) Float.class));
-        SCHEMA_TYPE_CLASSES.put(Type.FLOAT64, Arrays.asList((Class) Double.class));
-        SCHEMA_TYPE_CLASSES.put(Type.BOOLEAN, Arrays.asList((Class) Boolean.class));
-        SCHEMA_TYPE_CLASSES.put(Type.STRING, Arrays.asList((Class) String.class));
+    private static final Map<Type, List<Class<?>>> SCHEMA_TYPE_CLASSES = Collections.unmodifiableMap(new EnumMap<>(Map.ofEntries(
+        Map.entry(Type.INT8, List.of(Byte.class)),
+        Map.entry(Type.INT16, List.of(Short.class)),
+        Map.entry(Type.INT32, List.of(Integer.class)),
+        Map.entry(Type.INT64, List.of(Long.class)),
+        Map.entry(Type.FLOAT32, List.of(Float.class)),
+        Map.entry(Type.FLOAT64, List.of(Double.class)),
+        Map.entry(Type.BOOLEAN, List.of(Boolean.class)),
+        Map.entry(Type.STRING, List.of(String.class)),
         // Bytes are special and have 2 representations. byte[] causes problems because it doesn't handle equals() and
         // hashCode() like we want objects to, so we support both byte[] and ByteBuffer. Using plain byte[] can cause
         // those methods to fail, so ByteBuffers are recommended
-        SCHEMA_TYPE_CLASSES.put(Type.BYTES, Arrays.asList((Class) byte[].class, (Class) ByteBuffer.class));
-        SCHEMA_TYPE_CLASSES.put(Type.ARRAY, Arrays.asList((Class) List.class));
-        SCHEMA_TYPE_CLASSES.put(Type.MAP, Arrays.asList((Class) Map.class));
-        SCHEMA_TYPE_CLASSES.put(Type.STRUCT, Arrays.asList((Class) Struct.class));
+        Map.entry(Type.BYTES, List.of(byte[].class, ByteBuffer.class)),
+        Map.entry(Type.ARRAY, List.of(List.class)),
+        Map.entry(Type.MAP, List.of(Map.class)),
+        Map.entry(Type.STRUCT, List.of(Struct.class))
+    )));
+    /**
+     * Maps known logical types to a list of Java classes that can be used to represent them.
+     */
+    // We don't need to put these into JAVA_CLASS_SCHEMA_TYPES since that's only used to determine schemas for
+    // schemaless data and logical types will have ambiguous schemas (e.g. many of them use the same Java class) so
+    // they should not be used without schemas.
+    private static final Map<String, List<Class<?>>> LOGICAL_TYPE_CLASSES = Map.of(
+        Decimal.LOGICAL_NAME, List.of(BigDecimal.class),
+        Date.LOGICAL_NAME, List.of(java.util.Date.class),
+        Time.LOGICAL_NAME, List.of(java.util.Date.class),
+        Timestamp.LOGICAL_NAME, List.of(java.util.Date.class)
+    );
 
-        for (Map.Entry<Type, List<Class>> schemaClasses : SCHEMA_TYPE_CLASSES.entrySet()) {
-            for (Class<?> schemaClass : schemaClasses.getValue())
-                JAVA_CLASS_SCHEMA_TYPES.put(schemaClass, schemaClasses.getKey());
-        }
-
-        LOGICAL_TYPE_CLASSES.put(Decimal.LOGICAL_NAME, Arrays.asList((Class) BigDecimal.class));
-        LOGICAL_TYPE_CLASSES.put(Date.LOGICAL_NAME, Arrays.asList((Class) java.util.Date.class));
-        LOGICAL_TYPE_CLASSES.put(Time.LOGICAL_NAME, Arrays.asList((Class) java.util.Date.class));
-        LOGICAL_TYPE_CLASSES.put(Timestamp.LOGICAL_NAME, Arrays.asList((Class) java.util.Date.class));
-        // We don't need to put these into JAVA_CLASS_SCHEMA_TYPES since that's only used to determine schemas for
-        // schemaless data and logical types will have ambiguous schemas (e.g. many of them use the same Java class) so
-        // they should not be used without schemas.
-    }
+    /**
+     * Maps the Java classes to the corresponding {@link Schema.Type}.
+     */
+    private static final Map<Class<?>, Type> JAVA_CLASS_SCHEMA_TYPES = SCHEMA_TYPE_CLASSES.entrySet()
+        .stream()
+        .flatMap(entry -> entry.getValue().stream().map(klass -> Map.entry(klass, entry.getKey())))
+        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
 
     // The type of the field
     private final Type type;
@@ -93,6 +92,8 @@ public class ConnectSchema implements Schema {
     // Optional human readable documentation describing this schema.
     private final String doc;
     private final Map<String, String> parameters;
+    // precomputed hash code. There is no need to re-compute every time hashCode() is called.
+    private Integer hash = null;
 
     /**
      * Construct a Schema. Most users should not construct schemas manually, preferring {@link SchemaBuilder} instead.
@@ -107,7 +108,7 @@ public class ConnectSchema implements Schema {
         this.parameters = parameters;
 
         if (this.type == Type.STRUCT) {
-            this.fields = fields == null ? Collections.<Field>emptyList() : fields;
+            this.fields = fields == null ? List.of() : fields;
             this.fieldsByName = new HashMap<>(this.fields.size());
             for (Field field : this.fields)
                 fieldsByName.put(field.name(), field);
@@ -177,6 +178,7 @@ public class ConnectSchema implements Schema {
         return fields;
     }
 
+    @Override
     public Field field(String fieldName) {
         if (type != Type.STRUCT)
             throw new DataException("Cannot look up fields on non-struct type");
@@ -201,7 +203,7 @@ public class ConnectSchema implements Schema {
 
     /**
      * Validate that the value can be used with the schema, i.e. that its type matches the schema type and nullability
-     * requirements. Throws a DataException if the value is invalid.
+     * requirements. Throws a {@link DataException} if the value is invalid.
      * @param schema Schema to test
      * @param value value to test
      */
@@ -209,25 +211,19 @@ public class ConnectSchema implements Schema {
         validateValue(null, schema, value);
     }
 
-    public static void validateValue(String name, Schema schema, Object value) {
+    public static void validateValue(String field, Schema schema, Object value) {
+        validateValue(schema, value, field == null ? "value" : "field: \"" + field + "\"");
+    }
+
+    private static void validateValue(Schema schema, Object value, String location) {
         if (value == null) {
             if (!schema.isOptional())
-                throw new DataException("Invalid value: null used for required field: \"" + name
-                        + "\", schema type: " + schema.type());
-            else
-                return;
+                throw new DataException("Invalid value: null used for required " + location
+                        + ", schema type: " + schema.type());
+            return;
         }
 
-        List<Class> expectedClasses = LOGICAL_TYPE_CLASSES.get(schema.name());
-
-        if (expectedClasses == null)
-                expectedClasses = SCHEMA_TYPE_CLASSES.get(schema.type());
-
-        if (expectedClasses == null)
-            throw new DataException("Invalid Java object for schema type " + schema.type()
-                    + ": " + value.getClass()
-                    + " for field: \"" + name + "\"");
-
+        List<Class<?>> expectedClasses = expectedClassesFor(schema);
         boolean foundMatch = false;
         for (Class<?> expectedClass : expectedClasses) {
             if (expectedClass.isInstance(value)) {
@@ -235,10 +231,18 @@ public class ConnectSchema implements Schema {
                 break;
             }
         }
-        if (!foundMatch)
-            throw new DataException("Invalid Java object for schema type " + schema.type()
-                    + ": " + value.getClass()
-                    + " for field: \"" + name + "\"");
+
+        if (!foundMatch) {
+            StringBuilder exceptionMessage = new StringBuilder("Invalid Java object for schema");
+            if (schema.name() != null) {
+                exceptionMessage.append(" \"").append(schema.name()).append("\"");
+            }
+            exceptionMessage.append(" with type ").append(schema.type()).append(": ").append(value.getClass());
+            if (location != null) {
+                exceptionMessage.append(" for ").append(location);
+            }
+            throw new DataException(exceptionMessage.toString());
+        }
 
         switch (schema.type()) {
             case STRUCT:
@@ -249,22 +253,46 @@ public class ConnectSchema implements Schema {
                 break;
             case ARRAY:
                 List<?> array = (List<?>) value;
-                for (Object entry : array)
-                    validateValue(schema.valueSchema(), entry);
+                String entryLocation = "element of array " + location;
+                Schema arrayValueSchema = assertSchemaNotNull(schema.valueSchema(), entryLocation);
+                for (Object entry : array) {
+                    validateValue(arrayValueSchema, entry, entryLocation);
+                }
                 break;
             case MAP:
                 Map<?, ?> map = (Map<?, ?>) value;
+                String keyLocation = "key of map " + location;
+                String valueLocation = "value of map " + location;
+                Schema mapKeySchema = assertSchemaNotNull(schema.keySchema(), keyLocation);
+                Schema mapValueSchema = assertSchemaNotNull(schema.valueSchema(), valueLocation);
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
-                    validateValue(schema.keySchema(), entry.getKey());
-                    validateValue(schema.valueSchema(), entry.getValue());
+                    validateValue(mapKeySchema, entry.getKey(), keyLocation);
+                    validateValue(mapValueSchema, entry.getValue(), valueLocation);
                 }
                 break;
         }
     }
 
+    private static Schema assertSchemaNotNull(Schema schema, String location) {
+        if (schema == null) {
+            throw new DataException("No schema defined for " + location);
+        }
+        return schema;
+    }
+
+    private static List<Class<?>> expectedClassesFor(Schema schema) {
+        List<Class<?>> expectedClasses = null;
+        if (schema.name() != null) {
+            expectedClasses = LOGICAL_TYPE_CLASSES.get(schema.name());
+        }
+        if (expectedClasses == null)
+            expectedClasses = SCHEMA_TYPE_CLASSES.getOrDefault(schema.type(), List.of());
+        return expectedClasses;
+    }
+
     /**
      * Validate that the value can be used for this schema, i.e. that its type matches the schema type and optional
-     * requirements. Throws a DataException if the value is invalid.
+     * requirements. Throws a {@link DataException} if the value is invalid.
      * @param value the value to validate
      */
     public void validateValue(Object value) {
@@ -283,20 +311,24 @@ public class ConnectSchema implements Schema {
         if (o == null || getClass() != o.getClass()) return false;
         ConnectSchema schema = (ConnectSchema) o;
         return Objects.equals(optional, schema.optional) &&
+                Objects.equals(version, schema.version) &&
+                Objects.equals(name, schema.name) &&
+                Objects.equals(doc, schema.doc) &&
                 Objects.equals(type, schema.type) &&
-                Objects.equals(defaultValue, schema.defaultValue) &&
+                Objects.deepEquals(defaultValue, schema.defaultValue) &&
                 Objects.equals(fields, schema.fields) &&
                 Objects.equals(keySchema, schema.keySchema) &&
                 Objects.equals(valueSchema, schema.valueSchema) &&
-                Objects.equals(name, schema.name) &&
-                Objects.equals(version, schema.version) &&
-                Objects.equals(doc, schema.doc) &&
                 Objects.equals(parameters, schema.parameters);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(type, optional, defaultValue, fields, keySchema, valueSchema, name, version, doc, parameters);
+        if (this.hash == null) {
+            this.hash = Objects.hash(type, optional, defaultValue, fields, keySchema, valueSchema, name, version, doc,
+                parameters);
+        }
+        return this.hash;
     }
 
     @Override
@@ -311,8 +343,8 @@ public class ConnectSchema implements Schema {
     /**
      * Get the {@link Schema.Type} associated with the given class.
      *
-     * @param klass the Class to
-     * @return the corresponding type, nor null if there is no matching type
+     * @param klass the Class whose associated schema type is to be returned
+     * @return the corresponding type, or null if there is no matching type
      */
     public static Type schemaType(Class<?> klass) {
         synchronized (JAVA_CLASS_SCHEMA_TYPES) {

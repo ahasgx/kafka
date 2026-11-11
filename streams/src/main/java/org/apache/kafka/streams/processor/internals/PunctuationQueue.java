@@ -16,16 +16,21 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
+import org.apache.kafka.streams.errors.TaskMigratedException;
+import org.apache.kafka.streams.processor.Cancellable;
+import org.apache.kafka.streams.processor.PunctuationType;
+
 import java.util.PriorityQueue;
 
 public class PunctuationQueue {
 
     private final PriorityQueue<PunctuationSchedule> pq = new PriorityQueue<>();
 
-    public void schedule(PunctuationSchedule sched) {
+    public Cancellable schedule(final PunctuationSchedule sched) {
         synchronized (pq) {
             pq.add(sched);
         }
+        return sched.cancellable();
     }
 
     public void close() {
@@ -34,21 +39,52 @@ public class PunctuationQueue {
         }
     }
 
-    public boolean mayPunctuate(long timestamp, Punctuator punctuator) {
+    /**
+     * @throws TaskMigratedException if the task producer got fenced (EOS only)
+     */
+    boolean maybePunctuate(final long timestamp, final PunctuationType type, final ProcessorNodePunctuator processorNodePunctuator) {
         synchronized (pq) {
             boolean punctuated = false;
             PunctuationSchedule top = pq.peek();
             while (top != null && top.timestamp <= timestamp) {
-                PunctuationSchedule sched = top;
+                final PunctuationSchedule sched = top;
                 pq.poll();
-                punctuator.punctuate(sched.node(), timestamp);
-                pq.add(sched.next(timestamp));
-                punctuated = true;
+
+                if (!sched.isCancelled()) {
+                    processorNodePunctuator.punctuate(sched.node(), timestamp, type, sched.punctuator());
+                    // sched can be cancelled from within the punctuator
+                    if (!sched.isCancelled()) {
+                        final PunctuationSchedule next = sched.next(timestamp);
+                        if (next.timestamp > timestamp) {
+                            pq.add(next);
+                        }
+                    }
+                    punctuated = true;
+                }
+
 
                 top = pq.peek();
             }
 
             return punctuated;
+        }
+    }
+
+    /**
+     * Returns true if there is a schedule ready to be punctuated.
+     */
+    boolean canPunctuate(final long timestamp) {
+        synchronized (pq) {
+            PunctuationSchedule top = pq.peek();
+            while (top != null && top.timestamp <= timestamp) {
+                if (!top.isCancelled()) {
+                    return true;
+                }
+                // Side-effect: removes cancelled schedules (not externally visible)
+                pq.poll();
+                top = pq.peek();
+            }
+            return false;
         }
     }
 
